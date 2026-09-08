@@ -14,6 +14,7 @@ UNIT=/etc/systemd/system/linuxpass.service
 DEFAULTS=/etc/default/linuxpass
 POLKIT=/etc/polkit-1/rules.d/50-linuxpass.rules
 DESKTOP=/usr/share/applications/linuxpass-gui.desktop
+KEYDIR=/etc/linuxpass
 GUI_USER=${SUDO_USER:-${GUI_USER:-}}
 PY="$ROOT/.venv/bin/python"
 [ -x "$PY" ] || PY=$(command -v python3)
@@ -72,6 +73,24 @@ EOF
     echo "wrote $DESKTOP  (menu entry for the GUI)"
   fi
 
+  # The service runs as root, so it looks for keys in /etc/linuxpass rather than in a
+  # user's ~/.config. Move them across if the invoking user has them and root does not.
+  mkdir -p "$KEYDIR"
+  chmod 0700 "$KEYDIR"
+  if [ -n "$GUI_USER" ]; then
+    USER_CFG=$(getent passwd "$GUI_USER" | cut -d: -f6)/.config/linuxpass
+    for k in aes_keys.txt linuxpass.keys; do
+      if [ -f "$USER_CFG/$k" ] && [ ! -f "$KEYDIR/$k" ]; then
+        install -m 0600 -o root -g root "$USER_CFG/$k" "$KEYDIR/$k"
+        echo "copied $k into $KEYDIR (the service runs as root and cannot read \$HOME)"
+      fi
+    done
+  fi
+  if [ ! -f "$KEYDIR/aes_keys.txt" ]; then
+    echo "NOTE: no $KEYDIR/aes_keys.txt -- the daemon will not derive a link key."
+    echo "      See the wiki page \"Getting your keys\"."
+  fi
+
   systemctl daemon-reload
   systemd-analyze verify "$UNIT" 2>&1 | grep -v '^$' && echo "(verify emitted the above)"
   systemctl enable linuxpass.service
@@ -89,7 +108,8 @@ uninstall)
   rm -f "$UNIT" "$POLKIT" "$DESKTOP"
   systemctl daemon-reload
   command -v update-desktop-database >/dev/null && update-desktop-database -q 2>/dev/null
-  echo "removed $UNIT, $POLKIT and $DESKTOP (left $DEFAULTS and the store alone)"
+  echo "removed $UNIT, $POLKIT and $DESKTOP"
+  echo "left alone: $DEFAULTS, $KEYDIR (your keys) and the store"
   ;;
 start|stop|restart|status)
   need_root

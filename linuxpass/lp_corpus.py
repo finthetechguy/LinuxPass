@@ -49,6 +49,7 @@ def dirs():
     if env:
         out.extend(p for p in env.split(os.pathsep) if p)
     out.append(_config_dir())
+    out.append('/etc/linuxpass/corpus')
     here = os.path.dirname(os.path.abspath(__file__))
     out.append(os.path.join(os.path.dirname(here), 'tests', 'corpus'))
     out.append(os.path.join(os.getcwd(), 'tests', 'corpus'))

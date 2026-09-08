@@ -17,8 +17,11 @@ when it is needed from files you generate from your own hardware:
 Both files are looked up in the same order, first hit wins:
 
     1. an explicit path       -- $LINUXPASS_KEYS / $LINUXPASS_KEYFILE, or --keys on the CLI
-    2. the config directory   -- $XDG_CONFIG_HOME/linuxpass/ (default ~/.config/linuxpass/)
-    3. the current directory
+    2. $LINUXPASS_KEYDIR      -- a directory holding both
+    3. the config directory   -- $XDG_CONFIG_HOME/linuxpass/ (default ~/.config/linuxpass/)
+    4. the system directory   -- /etc/linuxpass/, which is where the systemd service finds
+                                 them, since it runs as root and has no useful ~/.config
+    5. the current directory
 
 Nothing here caches to disk, and no value loaded here is ever written to a log.
 
@@ -33,6 +36,7 @@ import sys
 CONFIG_DIR_NAME = 'linuxpass'
 AES_KEYS_FILE = 'aes_keys.txt'
 CONSTANTS_FILE = 'linuxpass.keys'
+SYSTEM_DIR = '/etc/linuxpass'
 
 # The 3DS AES key scrambler constant. This is an algorithm parameter, not key material:
 # it is identical on every console, is published on 3dbrew, and reveals nothing about any
@@ -67,6 +71,7 @@ def search_paths(filename, explicit=None):
     if envdir:
         out.append(os.path.join(envdir, filename))
     out.append(os.path.join(_config_dir(), filename))
+    out.append(os.path.join(SYSTEM_DIR, filename))
     out.append(os.path.join(os.getcwd(), filename))
     seen, uniq = set(), []
     for p in out:
