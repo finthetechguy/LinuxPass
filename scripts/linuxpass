@@ -1,0 +1,71 @@
+#!/bin/bash
+# Run LinuxPass in the foreground: monitor up, daemon, machine put back on exit.
+#
+#   sudo ./scripts/linuxpass                      # relay_store, auto adapter, channels 1,6,11
+#   sudo ./scripts/linuxpass wlp3s0 1,6,11 --window 90
+#
+# Anything after the first two arguments goes straight to `sp_relay.py run`.
+#
+# For anything unattended, prefer the service -- it restarts itself on a stall, which this does
+# not:
+#   sudo ./install/install.sh install && sudo systemctl start linuxpass
+#
+# THERE IS NO REBOOT DEADMAN HERE ANY MORE. There used to be: a systemd-run timer that fired
+# `echo b > /proc/sysrq-trigger`, re-armed every 240 s, because an ath9k oops leaves rtnl_lock
+# held and a clean reboot then hangs forever. Two things changed.
+#
+#   1. The oops had a single cause -- creating the monitor vif plain and setting `monitor active`
+#      afterwards, which leaves vif->txq NULL for ath_tx_node_init() to dereference at `link set
+#      up`. This box's journal has it exactly twice (31 Aug 2026 21:03:23 and 23:20:31), both
+#      through ath9k_add_interface <- ieee80211_do_open, and none since sp_monitor.sh started
+#      passing `flags active` on the CREATE command.
+#   2. The deadman was not harmless. Boots -6, -5 and -3 in this machine's journal each end
+#      mid-session with no kernel fault and no shutdown sequence -- the journal simply stops
+#      between two ordinary log lines. That is what sysrq-b looks like from the inside, and it
+#      means the guard rebooted a healthy machine at least three times.
+#
+# A stalled daemon is now recovered by restarting the daemon (see linuxpass.service's WatchdogSec).
+# If you genuinely want the machine to reset when the KERNEL stops -- the one case userspace
+# cannot cover -- that is the hardware watchdog's job, not this script's: set RuntimeWatchdogSec
+# in /etc/systemd/system.conf, which drives /dev/watchdog (this box has iTCO_wdt).
+set -u
+
+IFACE=${1:-}          # empty: sp_monitor.sh picks an adapter
+CH=${2:-1,6,11}
+shift 2 2>/dev/null || shift $# 2>/dev/null
+MON=${SP_MON:-mon0}
+HERE=$(cd "$(dirname "$0")" && pwd)
+ROOT=$(cd "$HERE/.." && pwd)
+PY="$ROOT/.venv/bin/python"
+[ -x "$PY" ] || PY=python3
+
+# --store may be given in the passthrough arguments; find it so the identity matches the store.
+STORE=relay_store
+prev=""
+for arg in "$@"; do
+  [ "$prev" = "--store" ] && STORE=$arg
+  prev=$arg
+done
+case "$STORE" in /*) ;; *) STORE="$ROOT/$STORE" ;; esac
+
+if [ "$(id -u)" -ne 0 ]; then echo "needs root; re-run with sudo."; exit 1; fi
+
+OURMAC=$("$PY" "$ROOT/linuxpass/sp_relay.py" identity --store "$STORE" 2>/dev/null)
+echo "interface $IFACE -> $MON, channels $CH"
+echo "store      $STORE"
+echo "identity   $OURMAC (fixed; --rotate-identity changes it per exchange)"
+
+cleanup() {
+  echo
+  echo "cleaning up..."
+  SP_IFACE=$IFACE SP_MON=$MON SP_STORE=$STORE "$HERE/sp_monitor.sh" down
+}
+trap cleanup EXIT INT TERM
+
+SP_IFACE=$IFACE SP_MON=$MON SP_STORE=$STORE "$HERE/sp_monitor.sh" up || exit 1
+echo
+echo "control socket: $STORE/relay.sock"
+echo "  $PY $ROOT/linuxpass/sp_relay.py ctl status  --store $STORE"
+echo "  $PY $ROOT/linuxpass/sp_relay.py ctl pause   --store $STORE"
+echo
+"$PY" "$ROOT/linuxpass/sp_relay.py" run --store "$STORE" --iface "$MON" --channel "$CH" "$@"

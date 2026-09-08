@@ -1,0 +1,141 @@
+#!/bin/bash
+# STAGE 2 driver -- monitor interface up, run sp_link.py, put the machine back.
+#
+#   sudo ./scripts/linuxpass-link                # auto adapter, hunting across 1,6,11
+#   sudo ./scripts/linuxpass-link wlp3s0 11 --secs 300 -v 2
+#
+# Anything after the first two arguments goes straight to sp_link.py.
+#
+# SAFETY: this script arms a DEADMAN REBOOT before it touches the radio and cancels it on a clean
+# exit. On 31 Aug 2026 an `iw`/`ip` sequence on this exact box oopsed inside ath9k
+# (ath_tx_node_init, NULL deref) while holding rtnl_lock, which wedged all of userspace -- the
+# kernel still answered ping but sshd could never complete a login, so the only recovery was
+# physical. With the deadman armed, that becomes a wait instead of a trip to the machine.
+# Every radio command also runs under `timeout` so one hanging call cannot take the session.
+set -u
+
+IFACE=${1:-}          # empty: sp_monitor.sh picks an adapter
+CH=${2:-1,6,11}
+shift 2 2>/dev/null || shift $# 2>/dev/null
+MON=mon0
+HERE=$(cd "$(dirname "$0")" && pwd)
+ROOT=$(cd "$HERE/.." && pwd)
+PY="$ROOT/.venv/bin/python"
+[ -x "$PY" ] || PY=python3
+# The deadman must OUTLIVE the run, or it reboots the box mid-experiment -- which it did on
+# 1 Sep 2026 during a 20-minute run against a 12-minute default. Derive it from --secs.
+RUN_SECS=$(printf '%s\n' "$@" | awk '/^--secs$/{getline; print; exit}')
+: "${RUN_SECS:=180}"
+DEADMAN_MIN=${DEADMAN_MIN:-$(( RUN_SECS / 60 + 8 ))}
+
+if [ "$(id -u)" -ne 0 ]; then echo "needs root; re-run with sudo."; exit 1; fi
+for t in iw ip timeout; do command -v $t >/dev/null || { echo "install $t"; exit 1; }; done
+
+if ! timeout 10 iw dev "$IFACE" info >/dev/null 2>&1; then
+  echo "no such wireless interface: $IFACE"; iw dev | sed -n 's/^\tInterface /  /p'; exit 1
+fi
+DRIVER=$(basename "$(readlink -f "/sys/class/net/$IFACE/device/driver" 2>/dev/null)" 2>/dev/null)
+echo "interface $IFACE (driver ${DRIVER:-unknown}), channel $CH"
+
+DEADMAN_ARMED=0
+# NOTE: do NOT use `shutdown -r +N` here. It writes /run/nologin, and PAM then refuses ordinary
+# logins for the whole delay -- which locks you out of the very SSH session needed to cancel it.
+# Learned the hard way on 31 Aug 2026. systemd-run schedules a reboot without touching nologin.
+arm_deadman() {
+  # SysRq 'b', not `systemctl reboot`. A soft reboot has to tear down network interfaces, which
+  # blocks on the very rtnl_lock a driver oops leaves held -- the shutdown then hangs forever and
+  # the box ping-flaps without ever coming back (observed 31 Aug 2026, 20+ minutes). SysRq resets
+  # the machine from inside the kernel and cannot be blocked by any held lock.
+  if command -v systemd-run >/dev/null; then
+    systemctl stop sp-deadman.timer >/dev/null 2>&1
+    systemd-run --on-active="${DEADMAN_MIN}min" --unit=sp-deadman /bin/sh -c \
+      'echo 1 > /proc/sys/kernel/sysrq; echo b > /proc/sysrq-trigger' >/dev/null 2>&1 \
+      && DEADMAN_ARMED=1
+  fi
+  [ "$DEADMAN_ARMED" -eq 1 ] \
+    && echo "deadman reboot ARMED (+${DEADMAN_MIN} min) -- cancelled automatically on clean exit" \
+    || echo "WARNING: could not arm the deadman reboot; a driver wedge would need physical access"
+}
+disarm_deadman() {
+  [ "$DEADMAN_ARMED" -eq 1 ] || return 0
+  systemctl stop sp-deadman.timer >/dev/null 2>&1
+  systemctl reset-failed sp-deadman.service >/dev/null 2>&1
+  echo "deadman reboot cancelled"
+}
+
+NM_WAS_ACTIVE=0
+cleanup() {
+  echo
+  echo "cleaning up..."
+  timeout 10 iw dev "$MON" del 2>/dev/null
+  if [ "$NM_WAS_ACTIVE" -eq 1 ]; then systemctl start NetworkManager; fi
+  disarm_deadman
+}
+trap cleanup EXIT INT TERM
+
+arm_deadman
+
+if command -v systemctl >/dev/null && systemctl is-active --quiet NetworkManager; then
+  NM_WAS_ACTIVE=1
+  echo "stopping NetworkManager..."
+  command -v nmcli >/dev/null && nmcli device disconnect "$IFACE" >/dev/null 2>&1
+  systemctl stop NetworkManager
+fi
+
+# ACTIVE MONITOR -- monitor mode in which the hardware ACKs frames addressed to our MAC.
+#
+# This is what Stage 2 needs: an 802.11 ACK is SIFS-timed (~10 us) and can only come from silicon,
+# and without it the console abandons every encounter after its probe response goes unacknowledged.
+#
+# The `flags active` MUST be given ON THE CREATE COMMAND. mac80211 allocates the per-vif TXQ in
+# ieee80211_if_add() only when MONITOR_FLAG_ACTIVE is present at that moment -- verified in the
+# shipped binary:
+#     25368: mov 0x10(%rsp),%rax      ; params
+#     2536d: testb $0x40,(%rax)       ; params->flags & MONITOR_FLAG_ACTIVE (BIT(6))
+#     25370: jne 25054                ; ACTIVE -> allocate the TXQ
+# Creating plain and then running `iw dev mon0 set monitor active` sets the flag but CANNOT
+# retroactively allocate the TXQ, and ath9k's ath_node_to_tid() then does `txq = vif->txq` and
+# dereferences NULL -> kernel oops that wedges the whole machine. That two-step form cost two
+# hard reboots on 31 Aug 2026. Do not reintroduce it.
+OURMAC=${OURMAC:-$(printf 'ba:ae:6e:%02x:%02x:%02x' $((RANDOM%256)) $((RANDOM%256)) $((RANDOM%256)))}
+
+timeout 10 iw dev "$MON" del 2>/dev/null
+if ! timeout 15 iw dev "$IFACE" interface add "$MON" type monitor flags active; then
+  echo "could not create an ACTIVE monitor interface on $IFACE"
+  exit 1
+fi
+timeout 10 ip link set "$MON" down
+if ! timeout 10 ip link set "$MON" address "$OURMAC"; then
+  echo "could not set $MON MAC to $OURMAC"; exit 1
+fi
+# The default 1500 MTU is too small for a full StreetPass data frame. One maximum YY segment is
+# radiotap(12) + 802.11 hdr(24) + CCMP hdr(8) + LLC/SNAP+pad(10) + YY hdr(24) + payload(1452)
+# + MIC(8) = 1538 bytes handed to the socket, and AF_PACKET rejects anything over the MTU with
+# EMSGSIZE. A real console puts exactly these frames on the air, so shrink the segments and we
+# stop matching it -- raise the MTU instead.
+timeout 10 ip link set "$MON" mtu 2000 2>/dev/null \
+  || echo "WARNING: could not raise $MON MTU; 1452-byte segments will fail with EMSGSIZE"
+timeout 15 ip link set "$MON" up || { echo "could not bring $MON up"; exit 1; }
+# The managed vif holds the channel; with it up, `iw set channel` on mon0 returns EBUSY.
+timeout 15 ip link set "$IFACE" down 2>/dev/null
+echo "active monitor $MON up, MAC $OURMAC (hardware will ACK frames addressed to it)"
+echo
+
+if ls /sys/kernel/debug/ieee80211/*/ath9k/xmit >/dev/null 2>&1; then
+  echo "ath9k hardware TX counters: available"
+else
+  mount -t debugfs none /sys/kernel/debug 2>/dev/null
+  ls /sys/kernel/debug/ieee80211/*/ath9k/xmit >/dev/null 2>&1 \
+    && echo "ath9k hardware TX counters: available (mounted debugfs)" \
+    || echo "ath9k hardware TX counters: unavailable (netdev counters will be used)"
+fi
+echo
+
+TS=$(date +%s)
+# --mac must match the interface MAC or the hardware will not ACK what we claim to be.
+"$PY" "$ROOT/linuxpass/sp_link.py" --iface "$MON" --channel "$CH" --mac "$OURMAC" \
+     --pcap "$ROOT/stage2_${TS}.pcap" --log "$ROOT/stage2_${TS}.log" "$@"
+RC=$?
+echo
+echo "artifacts: stage2_${TS}.pcap  stage2_${TS}.log"
+exit $RC

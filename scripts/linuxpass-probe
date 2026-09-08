@@ -1,0 +1,109 @@
+#!/bin/bash
+# STAGE 1 driver -- set up a monitor interface, run sp_probe_tx.py, put the machine back.
+#
+#   sudo ./linuxpass-probe                      # defaults: wlan0 -> mon0, channels 1,6,11
+#   sudo ./linuxpass-probe wlan0 1,6,11
+#   sudo ./linuxpass-probe wlan0 6 --engage-secs 120 -v 2
+#
+# Intended for the ath9k box. ath9k is a real SoftMAC part: monitor-mode injection is its
+# canonical use, and it is the radio that has actually been RECEIVING for this project. The
+# MT7902 is NOT suitable -- see the note at the bottom of this file.
+#
+# Anything after the first two arguments is passed straight through to sp_probe_tx.py.
+set -u
+
+IFACE=${1:-wlan0}
+CHANS=${2:-1,6,11}
+shift 2 2>/dev/null || shift $# 2>/dev/null
+MON=mon0
+HERE=$(cd "$(dirname "$0")" && pwd)
+ROOT=$(cd "$HERE/.." && pwd)
+PY="$ROOT/.venv/bin/python"
+[ -x "$PY" ] || PY=python3
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "needs root (raw AF_PACKET socket + iw). Re-run with sudo."
+  exit 1
+fi
+
+for t in iw ip; do
+  command -v $t >/dev/null || { echo "install $t first"; exit 1; }
+done
+
+if ! iw dev "$IFACE" info >/dev/null 2>&1; then
+  echo "no such wireless interface: $IFACE"
+  echo "available:"; iw dev | sed -n 's/^\tInterface /  /p'
+  exit 1
+fi
+
+PHY=$(iw dev "$IFACE" info | sed -n 's/^\twiphy \(.*\)/phy\1/p')
+DRIVER=$(basename "$(readlink -f "/sys/class/net/$IFACE/device/driver" 2>/dev/null)" 2>/dev/null)
+echo "interface $IFACE  ($PHY, driver ${DRIVER:-unknown})"
+
+case "$DRIVER" in
+  ath9k*) ;;
+  mt7921*|mt76*)
+    echo
+    echo "############################################################################"
+    echo "# WARNING: $DRIVER. The MT7902 has never been shown to inject."
+    echo "#   sp_injtest sent 154 frames from this chip while an ath9k receiver sat on"
+    echo "#   the same channel a metre away and caught ZERO of them. Its MAC is behind"
+    echo "#   vendor firmware. Run this on the ath9k box instead."
+    echo "#   Continuing anyway in 5 s -- rung 0 (TX proof) will tell you either way."
+    echo "############################################################################"
+    sleep 5 ;;
+  *) echo "  (untested driver -- rung 0 will report whether it transmits)" ;;
+esac
+
+# ath9k publishes real per-queue hardware TX counters in debugfs. They are the strongest available
+# proof that a frame actually left the radio (rung 0), so make sure debugfs is mounted -- otherwise
+# the script silently falls back to the weaker netdev counter.
+if [ -d /sys/kernel/debug ] && ! mountpoint -q /sys/kernel/debug 2>/dev/null; then
+  mount -t debugfs none /sys/kernel/debug 2>/dev/null \
+    && echo "mounted debugfs (for ath9k hardware TX counters)"
+fi
+if ls /sys/kernel/debug/ieee80211/*/ath9k/xmit >/dev/null 2>&1; then
+  echo "ath9k hardware TX counters: available"
+else
+  echo "ath9k hardware TX counters: NOT available (will use netdev tx_packets instead)"
+fi
+
+NM_WAS_ACTIVE=0
+if command -v systemctl >/dev/null && systemctl is-active --quiet NetworkManager; then
+  NM_WAS_ACTIVE=1
+  echo "stopping NetworkManager (it retunes the radio underneath us)..."
+  command -v nmcli >/dev/null && nmcli device disconnect "$IFACE" >/dev/null 2>&1
+  systemctl stop NetworkManager
+fi
+
+cleanup() {
+  echo
+  echo "cleaning up..."
+  iw dev "$MON" del 2>/dev/null
+  if [ "$NM_WAS_ACTIVE" -eq 1 ]; then
+    echo "restarting NetworkManager..."
+    systemctl start NetworkManager
+  fi
+}
+trap cleanup EXIT INT TERM
+
+# Fresh monitor interface every run: a stale one may be left on the wrong channel or in a
+# half-configured state from a previous aborted run.
+iw dev "$MON" del 2>/dev/null
+if ! iw dev "$IFACE" interface add "$MON" type monitor; then
+  echo "could not create $MON on $IFACE"
+  exit 1
+fi
+ip link set "$MON" up || { echo "could not bring $MON up"; exit 1; }
+
+# The parent interface being up alongside a monitor interface makes some drivers fight over the
+# channel. Take it down; cleanup restores NetworkManager, which brings it back.
+ip link set "$IFACE" down 2>/dev/null
+
+echo "regulatory domain: $(iw reg get 2>/dev/null | sed -n 's/^country /  country /p' | head -1)"
+echo "  (channels 1/6/11 are legal everywhere -- no reg change needed for Stage 1)"
+echo
+
+"$PY" "$ROOT/linuxpass/sp_probe_tx.py" --iface "$MON" --channels "$CHANS" "$@"
+RC=$?
+exit $RC

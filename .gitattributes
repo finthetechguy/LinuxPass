@@ -1,0 +1,11 @@
+* text=auto eol=lf
+
+*.py    text diff=python
+*.sh    text
+*.md    text diff=markdown
+*.in    text
+*.rules text
+
+*.png   binary
+*.bin   binary
+*.pcap  binary

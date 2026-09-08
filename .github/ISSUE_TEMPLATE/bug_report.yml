@@ -1,0 +1,67 @@
+name: Bug report
+description: Something does not work
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Before you post, two things.**
+
+        **1. "It took three tries" is not a bug.** 34–44 % of completed exchanges need more
+        than one engagement — measured over 365 runs. And a console will exchange with a given
+        peer address *once*; it remembers who it has met. Both are covered in the wiki.
+
+        **2. Do not attach key material or captures.** `aes_keys.txt`, `linuxpass.keys`, NAND
+        or CEC dumps, and packet captures all carry either your keys or other people's Mii
+        names. Redact any 32-character hex string before pasting a log.
+
+  - type: textarea
+    id: verdict
+    attributes:
+      label: The verdict block from the run log
+      description: |
+        This is where every diagnosis starts, so please include it even if it looks empty.
+        It is the block at the end of a pass — the lines about console probes heard, console
+        OUI on air, frames sent, and how the pass ended.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce it
+      description: The exact command, and what the console was doing at the time (asleep, on the HOME menu, in a game).
+    validations:
+      required: true
+
+  - type: input
+    id: radio
+    attributes:
+      label: Wireless card and driver
+      description: "Output of: lspci -k | grep -A3 -i network"
+    validations:
+      required: true
+
+  - type: input
+    id: console
+    attributes:
+      label: Console model
+      placeholder: "3DS XL / 2DS / New 2DS XL / ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: versions
+    attributes:
+      label: Versions
+      description: "LinuxPass commit, python3 --version, kernel (uname -r), distribution."
+    validations:
+      required: true

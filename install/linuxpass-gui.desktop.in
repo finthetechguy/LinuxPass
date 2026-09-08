@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=LinuxPass
+GenericName=StreetPass for the Nintendo 3DS
+Comment=Watch and control the LinuxPass daemon
+Exec=__PY__ __ROOT__/gui/sp_gui.py --store __STORE__
+Icon=network-wireless
+Terminal=false
+Categories=Network;System;
+Keywords=3DS;StreetPass;CEC;Nintendo;relay;
+StartupNotify=true

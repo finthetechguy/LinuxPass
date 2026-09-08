@@ -1,0 +1,47 @@
+# --- console-derived material. NEVER commit any of this. -------------------------------
+aes_keys.txt
+linuxpass.keys
+*.key
+*.keys
+tests/corpus/
+corpus/
+
+# --- captures, dumps and console data --------------------------------------------------
+*.bin
+*.pcap
+*.pcapng
+*.log
+*.i64
+*.cxi
+*.app
+*.tmd
+*.cia
+*.3ds
+*.3dsx
+firm*.bin
+cecmsg_*
+partitionA*
+harvested*/
+
+# --- runtime state ----------------------------------------------------------------------
+relay_store/
+relay.env
+runs/
+*.sock
+
+# --- python -----------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+
+# --- editors and backups ------------------------------------------------------------------
+*.bak
+*.pre_*
+*.orig
+*.swp
+.idea/
+.vscode/

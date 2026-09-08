@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "linuxpass"
+version = "0.1.0"
+description = "StreetPass a Nintendo 3DS from Linux, with your own data, over your own radio"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+keywords = ["3ds", "streetpass", "nintendo", "802.11", "cec", "reverse-engineering"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Networking",
+]
+
+# Nothing here. The daemon and every self-test run on the standard library alone.
+dependencies = []
+
+[project.optional-dependencies]
+fast = ["pycryptodome>=3.15"]
+pcap = ["scapy>=2.5"]
+gui  = ["PyGObject>=3.42"]
+
+[project.scripts]
+linuxpass = "linuxpass._entry:relay"
+linuxpass-gui = "linuxpass._entry:gui"
+
+[tool.setuptools]
+packages = ["linuxpass"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+# Real defects only: pyflakes (undefined names, unused imports, dead assignments) and syntax
+# errors. Style is deliberately not enforced -- these files are written to be read, with long
+# explanatory comments and deliberate local idioms, and a formatter would fight that.
+select = ["F", "E9"]
+# The modules import each other flat by design (see docs/SCRIPTS.md), and several deliberately
+# import inside functions to keep start-up cheap and optional backends optional.
+ignore = ["E402", "E741"]

@@ -1,0 +1,24 @@
+name: Feature request
+description: Suggest something LinuxPass should do
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do that you cannot do now?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like it to do instead?
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Anything measured that supports this?
+      description: |
+        Optional, but valued. If this is based on observed console behaviour, say what you
+        observed and how often. If it is a hunch, say that — a marked guess is welcome, an
+        unmarked one is hard to act on.

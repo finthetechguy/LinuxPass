@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # Deliberately no `pip install`. LinuxPass has no required dependencies, and this job
+      # is the thing that keeps it that way: if a stdlib-only clone stops working, CI fails.
+      - name: Everything compiles
+        run: python -m compileall -q linuxpass gui tools
+
+      # These run with no aes_keys.txt and no test corpus, which is the situation a fresh
+      # clone is in. Checks that genuinely need real console captures report [SKIP].
+      - name: Daemon self-test
+        run: python linuxpass/sp_relay.py selftest
+
+      - name: Link self-test
+        run: python linuxpass/sp_link.py --selftest
+
+      - name: Full handshake simulation
+        run: python linuxpass/sp_link.py --simulate
+
+      - name: Remaining module self-tests
+        run: |
+          set -e
+          python linuxpass/sp_build.py --selftest
+          python linuxpass/sp_mii.py --selftest
+          python linuxpass/sp_cecstore.py --selftest
+          python linuxpass/sp_store.py --selftest
+          python linuxpass/sp_smdh.py --selftest
+          python linuxpass/sp_yysession.py --selftest
+          python linuxpass/sp_savefs.py --selftest
+          python linuxpass/sp_probe_tx.py --selftest
+          python linuxpass/sp_aes.py --selftest
+          python linuxpass/sp_identity.py selftest
+          python tools/macfilter_decode.py --selftest
+
+      - name: No key material has crept into the tree
+        run: ./.github/scripts/keyscan.sh
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shell scripts parse
+        run: |
+          set -e
+          for f in scripts/linuxpass scripts/linuxpass-link scripts/linuxpass-probe \
+                   scripts/sp_monitor.sh install/install.sh; do
+            bash -n "$f" && echo "ok  $f"
+          done
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - run: ruff check .
