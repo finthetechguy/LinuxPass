@@ -1,15 +1,10 @@
 # LinuxPass
 
-**StreetPass a real Nintendo 3DS from a Linux box, with your own data, over your own radio.**
+**StreetPass a real Nintendo 3DS from a Linux device, with your own data.**
 
 Walk past a 3DS with LinuxPass running and the console does what it does for any other 3DS:
-it exchanges a StreetPass message, blinks its notification LED green, and shows your Mii in
-its Mii Plaza. No homebrew on the console, no emulator, no server — just a Linux machine with
-a Wi-Fi card that can transmit in monitor mode.
-
-<!-- A short screen recording of the GUI and the console's green LED belongs here. None is
-     committed yet: the obvious candidates are recordings of real exchanges, and those show
-     other people's Mii names. -->
+it exchanges a StreetPass message, blinks its notification LED green, and exchanges title-specific
+data.
 
 ## Status
 
@@ -17,6 +12,14 @@ a Wi-Fi card that can transmit in monitor mode.
 retail hardware many times. It also has sharp edges: one radio driver is supported, the
 protocol reconstruction behind it is recent, and a first StreetPass usually takes more than
 one attempt (see below — that is normal, not a bug).
+
+**Working from end-to-end**
+- Real 3DS recieves CEC (StreetPass) data from Linux
+  - Notification LED blinks green - successful
+  - Invidual title data shown in Notifications applet
+- Linux recieves CEC data from 3DS
+  - Saved on disk
+  - Shown in GUI ('Inbox' tab)
 
 ## What it does
 
