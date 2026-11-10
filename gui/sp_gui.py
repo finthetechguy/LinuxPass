@@ -43,19 +43,6 @@ REFRESH_S = 2
 #: enables more than 12, so 12 is the number to warn at and 24 is the number to enforce.
 SOFT_TITLE_CAP = 12
 
-#: Written by the adapter dropdown, pulled in by the unit through `EnvironmentFile=-`. A plain
-#: user-owned file precisely so the GUI needs no privilege it does not already have: the polkit
-#: rule the installer writes covers `systemctl start/stop/restart linuxpass.service` and nothing
-#: else, so a drop-in under /etc/systemd would need root the GUI has no way to ask for.
-#:
-#: PRECEDENCE, measured on this box 6 Sep 2026 with a throwaway unit rather than assumed:
-#:   * an EnvironmentFile beats a unit `Environment=` line for the same key REGARDLESS of which
-#:     appears first -- this is why /etc/default/linuxpass works at all;
-#:   * a later EnvironmentFile beats an earlier one.
-#: The unit therefore lists this file AFTER /etc/default/linuxpass, so the GUI's choice wins over
-#: both the packaged default and the hand-edited one.
-ENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'relay.env')
-
 #: ARPHRD_IEEE80211_RADIOTAP. A monitor vif is a wireless netdev like any other, so it has to be
 #: excluded by type -- excluding the name `mon0` would miss a vif left behind under another name.
 ARPHRD_RADIOTAP = '803'
@@ -100,53 +87,6 @@ def wireless_ifaces():
     # transmits nothing, which looks exactly like a dead console. Offer the one that works first.
     out.sort(key=lambda t: (t[1] != 'ath9k', t[0]))
     return out
-
-
-def read_env_file(path=None):
-    """-> {KEY: value}. A missing file is not an error; the unit marks it optional too."""
-    d = {}
-    try:
-        with open(path or ENV_FILE) as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith('#') or '=' not in line:
-                    continue
-                k, _, v = line.partition('=')
-                d[k.strip()] = v.strip()
-    except OSError:
-        pass
-    return d
-
-
-def write_env_key(key, value, path=None):
-    """Set (or, with value=None, drop) one KEY, keeping every other assignment. -> None or error.
-
-    Only assignments survive a rewrite: the file is regenerated from the parsed keys, so any
-    hand-added comment is lost. That is why the header says the file is written by this program.
-
-    Written to a temp file and renamed, so a crash mid-write cannot leave the unit reading half
-    an assignment -- systemd would refuse to start the service and the GUI is how you would fix
-    that, which makes it exactly the wrong place to have a torn file.
-    """
-    path = path or ENV_FILE
-    d = read_env_file(path)
-    if value is None:
-        d.pop(key, None)
-    else:
-        d[key] = value
-    body = ["# Written by sp_gui.py. linuxpass.service pulls this in with `EnvironmentFile=-`,",
-            "# listed after /etc/default/linuxpass, so what is set here wins over both that file",
-            "# and the unit's own Environment= lines. Edit with the GUI, not by hand."]
-    body += ['%s=%s' % (k, d[k]) for k in sorted(d)]
-    try:
-        tmp = path + '.tmp'
-        with open(tmp, 'w') as f:
-            f.write('\n'.join(body) + '\n')
-        os.replace(tmp, path)
-        return None
-    except OSError as e:
-        return str(e)
-
 
 
 def run_async(fn, on_done=None):
@@ -354,7 +294,7 @@ class HomePage(Page):
     def refresh(self):
         run_async(lambda: (Daemon.unit_state(), self.app.daemon.try_call('status')), self._draw)
 
-    def _service_group(self, unit):
+    def _service_group(self, unit, st):
         active = unit.get('ActiveState') == 'active'
         sub = unit.get('SubState', '?')
         g = self.group('Service')
@@ -376,7 +316,7 @@ class HomePage(Page):
             box.append(b)
         r.add_suffix(box)
         g.add(r)
-        g.add(self._adapter_row(active))
+        g.add(self._adapter_row(st))
         if unit.get('UnitFileState'):
             g.add(row('Starts at boot', unit['UnitFileState']))
         if unit.get('NRestarts', '0') not in ('0', ''):
@@ -385,30 +325,31 @@ class HomePage(Page):
                       % unit['NRestarts']))
         return active
 
-    def _adapter_row(self, active):
-        """Choose which radio the daemon claims.
-
-        Settable only while the service is stopped: the monitor vif is built by ExecStartPre, so
-        a change made mid-run would not take effect until a restart, and a control that silently
-        does nothing is worse than one that is visibly unavailable.
-        """
+    def _adapter_row(self, st):
+        """Choose which radio the service claims. The daemon saves the choice, so it must be running."""
+        s = st['status'] if st else {}
+        can_save = s.get('can_save_settings', False)
         ifaces = wireless_ifaces()
-        chosen = read_env_file().get('SP_IFACE', '')
+        chosen = s.get('adapter', '')
         names = [n for n, _ in ifaces]
         labels = ['%s  (%s)' % (n, d) if d else n for n, d in ifaces]
-        # An adapter named in the env file but absent right now must still be listed, or simply
-        # opening this window would silently reassign the daemon to a different radio.
+        # A saved adapter that is absent right now must stay listed, or the row would show another.
         if chosen and chosen not in names:
             names.insert(0, chosen)
             labels.insert(0, '%s  (not present)' % chosen)
         if not names:
             return row('Adapter', 'no wireless device found')
-        r = row('Adapter', 'stop the service to change this' if active
-                else 'used the next time the service starts')
+        if can_save:
+            sub = 'used from the next service restart'
+        elif st:
+            sub = 'only the systemd service can save this'
+        else:
+            sub = 'start the service to change this'
+        r = row('Adapter', sub)
         dd = Gtk.DropDown.new_from_strings(labels)
         dd.set_valign(Gtk.Align.CENTER)
         dd.set_selected(names.index(chosen) if chosen in names else 0)
-        dd.set_sensitive(not active and not self.busy)
+        dd.set_sensitive(can_save and not self.busy)
         dd.connect('notify::selected', self._adapter_changed, names)
         r.add_suffix(dd)
         return r
@@ -417,9 +358,8 @@ class HomePage(Page):
         i = dd.get_selected()
         if i >= len(names):          # GTK_INVALID_LIST_POSITION is G_MAXUINT, so this covers it
             return
-        err = write_env_key('SP_IFACE', names[i])
-        if err:
-            self.app.error('Could not save the adapter choice', err)
+        self.app.act('set_adapter', then='Adapter saved. Restart the service to use it.',
+                     name=names[i])
 
     def _service_action(self, _btn, verb):
         self.busy = True
@@ -452,7 +392,7 @@ class HomePage(Page):
             return
         unit, (st, why) = result
         self.reset()
-        active = self._service_group(unit)
+        active = self._service_group(unit, st)
 
         if st is None:
             g = self.group('Exchanges')
@@ -504,9 +444,7 @@ class HomePage(Page):
     def _rotation_row(self, s):
         """How often the relay takes a new MAC.
 
-        Applied live over the control socket AND written to relay.env, so the setting both takes
-        effect now and survives a restart -- the same value in both places, so there is no
-        precedence question to get wrong. The daemon only ever changes identity at a pass
+        The daemon applies it now and saves it for restarts. It only changes identity at a pass
         boundary, so nothing here can interrupt an exchange in progress.
         """
         cur = int(s.get('rotate_every_s') or 0)
@@ -547,10 +485,6 @@ class HomePage(Page):
         if i >= len(vals):           # GTK_INVALID_LIST_POSITION is G_MAXUINT
             return
         n = vals[i]
-        err = write_env_key('SP_ROTATE', str(n))
-        if err:
-            self.app.error('Could not save the rotation setting', err)
-            return
         self.app.act('rotate', then=('The MAC will now stay fixed' if not n
                                      else 'The MAC will change every %s' % human_secs(n)),
                      seconds=n)

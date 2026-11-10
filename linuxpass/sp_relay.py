@@ -88,6 +88,41 @@ def sp_identity_seed():
     return sp_identity.SEED_PREFIX
 
 
+ADAPTER_RE = re.compile(r'[A-Za-z0-9_.-]{1,15}')
+
+
+def read_env_file(path):
+    """-> {KEY: value}. A missing file is not an error; the unit marks it optional too."""
+    d = {}
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#') or '=' not in line:
+                    continue
+                k, _, v = line.partition('=')
+                d[k.strip()] = v.strip()
+    except OSError:
+        pass
+    return d
+
+
+def write_env_key(path, key, value):
+    """Set one KEY, keeping the others. Renamed into place so systemd never reads half a file. -> None or error."""
+    d = read_env_file(path)
+    d[key] = value
+    body = ['# Written by the LinuxPass daemon. Change these from the GUI or `sp_relay.py ctl`.']
+    body += ['%s=%s' % (k, d[k]) for k in sorted(d)]
+    try:
+        tmp = path + '.tmp'
+        with open(tmp, 'w') as f:
+            f.write('\n'.join(body) + '\n')
+        os.replace(tmp, path)
+        return None
+    except OSError as e:
+        return str(e)
+
+
 def peer_can_read(path, uid):
     """Could `uid` read `path` itself? The daemon is root and must not read on behalf of someone who cannot."""
     if uid == 0:
@@ -588,6 +623,9 @@ class Control:
                     except OSError:
                         pass
                 r.log('  rotation set to %s' % ('every %d s' % r.rotate_seconds() if n else 'OFF'))
+                err = r.save_setting('SP_ROTATE', str(n))
+                if err:
+                    return {'ok': False, 'error': 'applied, but not saved for restarts: %s' % err}
             if req.get('now'):
                 r.identity_since = 0.0
                 r.log('  a rotation is due at the next pass boundary')
@@ -598,6 +636,18 @@ class Control:
                                                             + r.rotate_seconds() - time.time(), 1)))}
 
         # ---- store mutations, all under the lock so a pass cannot read a half-change ---
+        if cmd == 'set_adapter':
+            name = req.get('name')
+            if not isinstance(name, str) or not ADAPTER_RE.fullmatch(name):
+                return {'ok': False, 'error': 'not an interface name: %r' % (name,)}
+            if not r.settings_file():
+                return {'ok': False, 'error': 'only the systemd service saves settings; '
+                                              'set SP_IFACE yourself for a foreground run'}
+            err = r.save_setting('SP_IFACE', name)
+            if err:
+                return {'ok': False, 'error': err}
+            r.log('  adapter %s will be used from the next service restart' % name)
+            return {'ok': True, 'adapter': name}
         if cmd == 'title_remove':
             try:
                 with r.lock:
@@ -843,6 +893,14 @@ class Relay:
             return self.random_identity()
         return self.identity
 
+    def settings_file(self):
+        return getattr(self.a, 'settings_file', None)
+
+    def save_setting(self, key, value):
+        """Keep a setting for the next service start. -> None, or why it could not be saved."""
+        path = self.settings_file()
+        return write_env_key(path, key, value) if path else None
+
     def rotation_path(self):
         return os.path.join(self.a.store, ROTATION_FILE)
 
@@ -1004,6 +1062,9 @@ class Relay:
             'last_error': self.last_error,
             'identity': self.identity,
             'iface_mismatch': self.iface_mismatch,
+            'can_save_settings': bool(self.settings_file()),
+            'adapter': (read_env_file(self.settings_file()).get('SP_IFACE', '')
+                        if self.settings_file() else ''),
             'rotate_identity': bool(self.a.rotate_identity),
             'rotate_every_s': self.rotate_seconds(),
             'identity_age_s': round(time.time() - self.identity_since, 1),
@@ -1804,6 +1865,26 @@ def _selftest():
         seen = []
         ron.set_iface_mac = lambda mac: seen.append(mac) or True
         before = ron.identity
+        envp = os.path.join(tmp, 'relay.env')
+        write_env_key(envp, 'SP_EXTRA', '--keep-runs 5')
+        sr = Relay(argparse.Namespace(**{**vars(args), 'store': os.path.join(tmp, 'storeS'),
+                                         'settings_file': envp}))
+        sr.log = lambda m: None
+        sc = Control(os.path.join(tmp, 'unused3.sock'), sr)
+        chk('saving the adapter works', sc.handle({'cmd': 'set_adapter', 'name': 'wlp3s0'})['ok'])
+        chk('and status reports it', sr.status()['adapter'] == 'wlp3s0' and sr.status()['can_save_settings'])
+        chk('a rotation period is saved for the next restart',
+            sc.handle({'cmd': 'rotate', 'seconds': 3600})['ok']
+            and read_env_file(envp).get('SP_ROTATE') == '3600')
+        chk('other settings in the file survive', read_env_file(envp).get('SP_EXTRA') == '--keep-runs 5')
+        for bad in ('wlan0\nSP_EXTRA=--evil', '../x', 'a' * 16, '', None, 7):
+            chk('a bad adapter name is refused: %r' % (bad,),
+                not sc.handle({'cmd': 'set_adapter', 'name': bad})['ok'])
+        chk('the file still holds only the good value', read_env_file(envp).get('SP_IFACE') == 'wlp3s0'
+            and '--evil' not in open(envp).read())
+        chk('a foreground daemon refuses to save an adapter',
+            not Control(os.path.join(tmp, 'unused4.sock'), r).handle(
+                {'cmd': 'set_adapter', 'name': 'wlp3s0'})['ok'])
         rep = Control(os.path.join(tmp, 'unused2.sock'), ron).handle(
             {'cmd': 'rotate', 'seconds': 3600})
         chk('turning rotation on does not touch the interface from the control thread either',
@@ -2338,6 +2419,9 @@ def main():
                           'unrecovered baseline.')
     run.add_argument('--pcap', action='store_true')
     run.add_argument('--verbose', '-v', type=int, default=1)
+    run.add_argument('--settings-file', metavar='PATH',
+                     help='where the GUI\'s adapter and rotation choices are saved. The unit '
+                          'reads this file when it starts.')
     run.add_argument('--control-user', default=os.environ.get('SUDO_USER'), metavar='NAME',
                      help='the one non-root user allowed to use the control socket '
                           '(default: whoever ran sudo; empty means root only)')
@@ -2357,7 +2441,7 @@ def main():
     ct.add_argument('command', choices=['status', 'pause', 'resume', 'toggle', 'stop', 'import',
                                         'forget', 'seed', 'store', 'encounters', 'denylist',
                                         'log', 'block', 'unblock', 'cooldown', 'title_remove',
-                                        'message_remove', 'rotate'])
+                                        'message_remove', 'rotate', 'set_adapter'])
     ct.add_argument('--store', default='relay_store')
     ct.add_argument('--path', help='for `ctl import`: what to ingest')
     ct.add_argument('--replace', action='store_true',
@@ -2370,6 +2454,7 @@ def main():
                          'period, 0 to turn rotation off')
     ct.add_argument('--now', action='store_true',
                     help='for `ctl rotate`: also take a new identity at the next pass boundary')
+    ct.add_argument('--adapter', help='for `ctl set_adapter`: the interface name')
     ct.add_argument('--title', help='for title_remove / message_remove, 8 hex digits')
     ct.add_argument('--id', help='for `ctl message_remove`: the message id, 16 hex digits')
     ct.add_argument('--box', default='outbox', choices=['inbox', 'outbox'])
@@ -2444,6 +2529,10 @@ def main():
                 kw['seconds'] = a.seconds
             if a.now:
                 kw['now'] = True
+        elif a.command == 'set_adapter':
+            if not a.adapter:
+                print('ctl set_adapter needs --adapter'); return 2
+            kw = {'name': a.adapter}
         elif a.command in ('encounters', 'log') and a.limit:
             kw = {'limit': a.limit}
         elif a.command == 'seed':

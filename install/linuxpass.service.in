@@ -35,8 +35,8 @@ Environment=SP_STORE=/var/lib/linuxpass
 Environment=SP_CHANNELS=1,6,11
 Environment=SP_WINDOW=180
 Environment=SP_IDLE=2
-# Identity rotation, in seconds; 0 (the default) never rotates. Written by the GUI's rotation
-# dropdown into relay.env below. Passed unconditionally rather than through a `${VAR:+...}` --
+# Identity rotation, in seconds; 0 (the default) never rotates. The GUI's rotation dropdown saves
+# it to relay.env below, through the daemon. Passed unconditionally rather than through a `${VAR:+...}` --
 # systemd's own expansion does not understand that form, and the daemon parses this leniently
 # (a typo logs a line and turns rotation off) because Restart=always with no start limit would
 # otherwise turn one bad character into an endless crash loop.
@@ -49,7 +49,7 @@ EnvironmentFile=-/var/lib/linuxpass/relay.env
 
 # Rebuilt on every (re)start, so a restart is also the recovery for a wedged interface.
 ExecStartPre=__ROOT__/scripts/sp_monitor.sh up
-ExecStart=/bin/sh -c 'exec __PY__ __ROOT__/linuxpass/sp_relay.py run --store "$SP_STORE" --iface "$SP_MON" --channel "$SP_CHANNELS" --window "$SP_WINDOW" --idle "$SP_IDLE" --rotate-every "$SP_ROTATE" --control-user "$SP_CONTROL_USER" $SP_EXTRA'
+ExecStart=/bin/sh -c 'exec __PY__ __ROOT__/linuxpass/sp_relay.py run --store "$SP_STORE" --iface "$SP_MON" --channel "$SP_CHANNELS" --window "$SP_WINDOW" --idle "$SP_IDLE" --rotate-every "$SP_ROTATE" --control-user "$SP_CONTROL_USER" --settings-file /var/lib/linuxpass/relay.env $SP_EXTRA'
 ExecStopPost=__ROOT__/scripts/sp_monitor.sh down
 
 # The daemon sends WATCHDOG=1 from inside its sniffing loop, at most every 5 s. If the radio
