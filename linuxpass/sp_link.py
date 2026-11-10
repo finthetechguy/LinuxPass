@@ -1648,7 +1648,7 @@ def simulate(verbose=1, peer_hook=None, out=None):
     # A neighbour WPA access point's PRIVACY-flagged probe response, delivered BEFORE the
     # console engages. This is the exact frame that hijacked the state machine on ch1 and made the
     # tool ignore the real console; it must be ignored and must not advance any state.
-    FOREIGN = 'c0:05:c2:d9:ac:e9'
+    FOREIGN = '00:00:5e:00:53:01'
     foreign = bytes.fromhex(
         '5000' '0000' + US.replace(':', '') + FOREIGN.replace(':', '')
         + FOREIGN.replace(':', '') + '0020'
@@ -2005,7 +2005,7 @@ def selftest():
     chk('note_on_air does not touch sightings', L.sightings == {})
     chk('is_console accepts both console OUIs and rejects an AP',
         T.is_console('96:58:cb:aa:bb:cc') and T.is_console('ba:ae:6e:dd:ee:ff')
-        and not T.is_console('ac:f8:cc:0a:d1:e7'))
+        and not T.is_console('00:00:5e:00:53:02'))
     src = inspect.getsource(Link.verdict)
     chk('the verdict no longer claims absence from probe requests alone',
         'NO CONSOLE WAS TRANSMITTING AT ALL' not in src)
