@@ -22,13 +22,11 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      # Deliberately no `pip install`. LinuxPass has no required dependencies, and this job
-      # is the thing that keeps it that way: if a stdlib-only clone stops working, CI fails.
+      # No `pip install`: this job keeps LinuxPass free of required dependencies.
       - name: Everything compiles
         run: python -m compileall -q linuxpass gui tools
 
-      # These run with no aes_keys.txt and no test corpus, which is the situation a fresh
-      # clone is in. Checks that genuinely need real console captures report [SKIP].
+      # These run with no keys and no corpus, as on a fresh clone.
       - name: Daemon self-test
         run: python linuxpass/sp_relay.py selftest
 

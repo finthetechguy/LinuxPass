@@ -1,18 +1,7 @@
 #!/bin/bash
-# Bring the ACTIVE monitor interface up, or put the machine back.
-#
-#   sudo ./scripts/sp_monitor.sh up
-#   sudo ./scripts/sp_monitor.sh down
-#
-# Tunables come from the environment so the systemd unit and the manual wrapper share one copy of
-# this logic:
-#   SP_IFACE  the real wireless interface       (default: pick one automatically)
-#   SP_MON    the monitor vif to create         (default mon0)
-#   SP_STORE  the relay store, used to derive our fixed MAC
-#   SP_MAC    an explicit MAC, overriding the store-derived one
-#
-# NOTHING IN HERE REBOOTS THE MACHINE. Recovery from a wedged radio is: tear the vif down, build
-# it again. That is what `ExecStartPre` does on every restart of linuxpass.service.
+# Bring the active monitor interface up, or put the machine back.
+#   sudo ./scripts/sp_monitor.sh up|down
+# Settings come from SP_IFACE, SP_MON, SP_STORE and SP_MAC in the environment.
 set -u
 ACTION=${1:-}
 IFACE=${SP_IFACE:-}
@@ -29,8 +18,7 @@ if [ "$(id -u)" -ne 0 ]; then echo "sp_monitor.sh needs root"; exit 1; fi
 for t in iw ip timeout; do command -v $t >/dev/null || { echo "install $t"; exit 1; }; done
 
 pick_iface() {
-  # Only ath9k is picked automatically: taking any other card would drop someone's Wi-Fi for a
-  # radio that cannot do this job. Any other driver has to be named in SP_IFACE.
+  # Only ath9k is picked automatically. Any other driver must be named in SP_IFACE.
   local i drv
   for i in $(iw dev 2>/dev/null | sed -n 's/^\tInterface //p'); do
     [ "$i" = "$MON" ] && continue
@@ -43,9 +31,7 @@ pick_iface() {
 }
 
 release_radio() {
-  # Prefer handing NetworkManager the single device: stopping NM outright takes every other
-  # connection on the box down with it, and this machine is reached over ethernet precisely so
-  # that the wifi can be commandeered. Only fall back to stopping NM if nmcli cannot do it.
+  # Release only this device, because stopping NetworkManager drops every other connection.
   command -v systemctl >/dev/null || return 0
   systemctl is-active --quiet NetworkManager || return 0
   if command -v nmcli >/dev/null && timeout 10 nmcli device set "$IFACE" managed no >/dev/null 2>&1; then
@@ -91,22 +77,13 @@ up)
   esac
   release_radio
   timeout 10 iw dev "$MON" del 2>/dev/null
-  # ACTIVE MONITOR. `flags active` MUST be on the CREATE command: mac80211 allocates the per-vif
-  # TXQ in ieee80211_if_add() only when MONITOR_FLAG_ACTIVE is present at that moment. Creating
-  # plain and then `iw dev mon0 set monitor active` sets the flag but cannot retroactively
-  # allocate the TXQ, and ath9k's ath_tx_node_init() then dereferences it -- an oops that wedges
-  # the machine. That is not a guess: this box's own journal has it twice, 31 Aug 2026 21:03 and
-  # 23:20, both `BUG: kernel NULL pointer dereference` at `ath_tx_node_init+0x41` reached through
-  # ath9k_add_interface <- ieee80211_do_open, i.e. at `ip link set mon0 up`. Do not reintroduce
-  # the two-step form.
+  # `flags active` must be on the create command, or ath9k dereferences a NULL txq and oopses.
   if ! timeout 15 iw dev "$IFACE" interface add "$MON" type monitor flags active; then
     echo "could not create an ACTIVE monitor interface on $IFACE"; exit 1
   fi
   timeout 10 ip link set "$MON" down
   timeout 10 ip link set "$MON" address "$MAC" || { echo "could not set $MON MAC"; exit 1; }
-  # 1500 is too small for a full StreetPass data frame: radiotap(12) + 802.11(24) + CCMP(8) +
-  # LLC/SNAP+pad(10) + YY(24) + payload(1452) + MIC(8) = 1538 handed to the socket, and
-  # AF_PACKET rejects anything over the MTU with EMSGSIZE.
+  # A full YY segment is 1538 bytes at the socket, over the default 1500 MTU.
   timeout 10 ip link set "$MON" mtu 2000 2>/dev/null \
     || echo "WARNING: could not raise $MON MTU; 1452-byte segments will fail with EMSGSIZE"
   timeout 15 ip link set "$MON" up || { echo "could not bring $MON up"; exit 1; }
@@ -114,8 +91,7 @@ up)
   echo "active monitor $MON up as $MAC (the hardware will ACK frames addressed to it)"
   ;;
 down)
-  # `up` may have substituted a different adapter than SP_IFACE names; hand back the one it
-  # actually took, otherwise NetworkManager never regains control of the real device.
+  # Hand back the adapter `up` really took, which may differ from SP_IFACE.
   [ -r "$RUN_IFACE" ] && IFACE=$(cat "$RUN_IFACE")
   timeout 10 iw dev "$MON" del 2>/dev/null
   restore_radio

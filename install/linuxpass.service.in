@@ -4,20 +4,11 @@ Documentation=https://github.com/finthetechguy/LinuxPass/wiki
 After=network.target
 Wants=network.target
 
-# --- the whole point of this unit -----------------------------------------------------------
-# A wedge costs THIS SERVICE and nothing else. The relay used to be guarded by a re-armed sysrq
-# reboot, because an ath9k oops leaves rtnl_lock held and a soft reboot then hangs forever. The
-# oops had one cause -- creating the monitor vif without `flags active` and setting the flag
-# afterwards -- and sp_monitor.sh no longer does that. So the deadman is replaced by a watchdog
-# whose blast radius is one systemd unit.
-#
-# FailureAction/StartLimitAction are stated even though `none` is the default, because their
-# other values (reboot, poweroff, reboot-force) are exactly what must never be set here.
+# A wedge costs this service and nothing else, so these must never be reboot or poweroff.
 FailureAction=none
 SuccessAction=none
 StartLimitAction=none
-# No rate limit: a radio that comes back after an hour should be picked up, not left dead because
-# the unit exhausted its restarts in the first minute.
+# No rate limit, so a radio that comes back after an hour is picked up.
 StartLimitIntervalSec=0
 
 [Service]
@@ -27,19 +18,14 @@ WorkingDirectory=__ROOT__
 
 # Everything tunable lives here; edit /etc/default/linuxpass, not this file.
 EnvironmentFile=-/etc/default/linuxpass
-# Left empty on purpose: sp_monitor.sh picks an adapter, because interface names are not
-# stable across reboots. Set it here or in /etc/default/linuxpass to pin one.
+# Empty picks the first ath9k adapter. Set it in /etc/default/linuxpass to pin one.
 Environment=SP_IFACE=
 Environment=SP_MON=mon0
 Environment=SP_STORE=/var/lib/linuxpass
 Environment=SP_CHANNELS=1,6,11
 Environment=SP_WINDOW=180
 Environment=SP_IDLE=2
-# Identity rotation, in seconds; 0 (the default) never rotates. The GUI's rotation dropdown saves
-# it to relay.env below, through the daemon. Passed unconditionally rather than through a `${VAR:+...}` --
-# systemd's own expansion does not understand that form, and the daemon parses this leniently
-# (a typo logs a line and turns rotation off) because Restart=always with no start limit would
-# otherwise turn one bad character into an endless crash loop.
+# Identity rotation in seconds; 0 never rotates. A typo turns rotation off instead of crash-looping.
 Environment=SP_ROTATE=0
 Environment=SP_EXTRA=
 # The one desktop user allowed to use the control socket; empty means root only.
@@ -52,10 +38,7 @@ ExecStartPre=__ROOT__/scripts/sp_monitor.sh up
 ExecStart=/bin/sh -c 'exec __PY__ __ROOT__/linuxpass/sp_relay.py run --store "$SP_STORE" --iface "$SP_MON" --channel "$SP_CHANNELS" --window "$SP_WINDOW" --idle "$SP_IDLE" --rotate-every "$SP_ROTATE" --control-user "$SP_CONTROL_USER" --settings-file /var/lib/linuxpass/relay.env $SP_EXTRA'
 ExecStopPost=__ROOT__/scripts/sp_monitor.sh down
 
-# The daemon sends WATCHDOG=1 from inside its sniffing loop, at most every 5 s. If the radio
-# wedges, the heartbeat stops and systemd restarts THIS SERVICE. 120 s is comfortably longer than
-# any single blocking call in the loop (the recv timeout is 0.25 s) and short enough that a wedge
-# costs at most two minutes of service.
+# The daemon sends WATCHDOG=1 from inside its sniffing loop, at most every 5 s.
 WatchdogSec=120
 Restart=always
 RestartSec=15
@@ -63,7 +46,6 @@ TimeoutStartSec=120
 TimeoutStopSec=30
 KillMode=mixed
 
-# Raw sockets and `iw` need privilege; everything else is given up.
 CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN CAP_SYS_ADMIN CAP_DAC_OVERRIDE CAP_CHOWN CAP_FOWNER CAP_SETUID CAP_SETGID CAP_KILL
 NoNewPrivileges=no
 ProtectHostname=yes

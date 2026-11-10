@@ -1,12 +1,6 @@
 #!/bin/bash
-# Install (or remove) linuxpass.service. The code is copied to a root-owned directory, because
-# a root service must never run files its desktop user can edit. Re-run after updating the checkout.
-#
-#   sudo ./install.sh install     # write the unit, reload, enable at boot
-#   sudo ./install.sh start|stop|restart|status|logs
-#   sudo ./install.sh uninstall   # stop, disable, remove the unit
-#
-# /etc/default/linuxpass holds the tunables and is NOT overwritten once it exists.
+# Install or remove linuxpass.service. Re-run after updating the checkout.
+# The code is copied because a root service must not run files a desktop user can edit.
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/.." && pwd)
@@ -66,7 +60,7 @@ install)
   if [ ! -e "$DEFAULTS" ]; then
     cat > "$DEFAULTS" <<EOF
 # Tunables for linuxpass.service. Edit here, then: systemctl restart linuxpass
-# SP_IFACE=          # empty or unset: an adapter is picked automatically. Pin one here.
+# Empty picks the first ath9k adapter. Any other driver must be named here.
 SP_IFACE=
 SP_MON=mon0
 SP_STORE=$STATE
@@ -91,11 +85,7 @@ EOF
     exit 1
   fi
 
-  # The GUI runs as an ordinary user and needs to start and stop this ONE unit. Without this,
-  # `systemctl start linuxpass` from a desktop session fails with "interactive authentication
-  # required" unless a polkit agent happens to be running. The alternatives are worse: a stored
-  # password in an askpass helper, or a blanket sudoers line. This grants exactly one verb on
-  # exactly one unit to exactly one user, and `uninstall` takes it away again.
+  # Lets the GUI start, stop and restart this one unit without a stored password.
   if [ -n "$GUI_USER" ] && [ -d /etc/polkit-1/rules.d ] && [ -f "$HERE/50-linuxpass.rules.in" ]; then
     sed -e "s|__GUI_USER__|$GUI_USER|g" "$HERE/50-linuxpass.rules.in" > "$POLKIT"
     chmod 0644 "$POLKIT"
@@ -104,7 +94,6 @@ EOF
     echo "NOTE: no polkit rule written; the GUI will need a polkit agent to start/stop the service"
   fi
 
-  # The GUI is a normal desktop app; give it a menu entry pointing at the installed copy.
   if [ -f "$HERE/linuxpass-gui.desktop.in" ] && [ -d /usr/share/applications ]; then
     sed -e "s|__ROOT__|$LIB|g" -e "s|__PY__|$PY|g" -e "s|__STORE__|$STORE_PATH|g" \
         "$HERE/linuxpass-gui.desktop.in" > "$DESKTOP"
@@ -113,8 +102,7 @@ EOF
     echo "wrote $DESKTOP  (menu entry for the GUI)"
   fi
 
-  # The service runs as root, so it looks for keys in /etc/linuxpass rather than in a
-  # user's ~/.config. Move them across if the invoking user has them and root does not.
+  # The service runs as root, so it reads keys from /etc/linuxpass.
   mkdir -p "$KEYDIR"
   chmod 0700 "$KEYDIR"
   if [ -n "$GUI_USER" ]; then

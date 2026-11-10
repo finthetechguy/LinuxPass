@@ -40,10 +40,7 @@ line-length = 100
 target-version = "py310"
 
 [tool.ruff.lint]
-# Real defects only: pyflakes (undefined names, unused imports, dead assignments) and syntax
-# errors. Style is deliberately not enforced -- these files are written to be read, with long
-# explanatory comments and deliberate local idioms, and a formatter would fight that.
+# Real defects only: pyflakes and syntax errors.
 select = ["F", "E9"]
-# The modules import each other flat by design (see docs/SCRIPTS.md), and several deliberately
-# import inside functions to keep start-up cheap and optional backends optional.
+# The modules import each other flat, and some import inside functions on purpose.
 ignore = ["E402", "E741"]

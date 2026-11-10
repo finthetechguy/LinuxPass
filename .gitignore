@@ -1,4 +1,4 @@
-# --- console-derived material. NEVER commit any of this. -------------------------------
+# Console-derived material. Never commit any of this.
 aes_keys.txt
 linuxpass.keys
 *.key
@@ -6,7 +6,7 @@ linuxpass.keys
 tests/corpus/
 corpus/
 
-# --- captures, dumps and console data --------------------------------------------------
+# Captures, dumps and console data
 *.bin
 *.pcap
 *.pcapng
@@ -23,13 +23,13 @@ cecmsg_*
 partitionA*
 harvested*/
 
-# --- runtime state ----------------------------------------------------------------------
+# Runtime state
 relay_store/
 relay.env
 runs/
 *.sock
 
-# --- python -----------------------------------------------------------------------------
+# Python
 __pycache__/
 *.py[cod]
 .venv/
@@ -38,7 +38,7 @@ venv/
 build/
 dist/
 
-# --- editors and backups ------------------------------------------------------------------
+# Editors and backups
 *.bak
 *.pre_*
 *.orig

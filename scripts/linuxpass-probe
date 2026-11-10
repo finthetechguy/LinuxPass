@@ -1,15 +1,6 @@
 #!/bin/bash
-# STAGE 1 driver -- set up a monitor interface, run sp_probe_tx.py, put the machine back.
-#
-#   sudo ./linuxpass-probe                      # defaults: wlan0 -> mon0, channels 1,6,11
-#   sudo ./linuxpass-probe wlan0 1,6,11
-#   sudo ./linuxpass-probe wlan0 6 --engage-secs 120 -v 2
-#
-# Intended for the ath9k box. ath9k is a real SoftMAC part: monitor-mode injection is its
-# canonical use, and it is the radio that has actually been RECEIVING for this project. The
-# MT7902 is NOT suitable -- see the note at the bottom of this file.
-#
-# Anything after the first two arguments is passed straight through to sp_probe_tx.py.
+# Set up a monitor interface, run sp_probe_tx.py, and put the machine back.
+#   sudo ./scripts/linuxpass-probe [iface] [channels] [sp_probe_tx.py arguments]
 set -u
 
 IFACE=${1:-wlan0}
@@ -55,9 +46,7 @@ case "$DRIVER" in
   *) echo "  (untested driver -- rung 0 will report whether it transmits)" ;;
 esac
 
-# ath9k publishes real per-queue hardware TX counters in debugfs. They are the strongest available
-# proof that a frame actually left the radio (rung 0), so make sure debugfs is mounted -- otherwise
-# the script silently falls back to the weaker netdev counter.
+# debugfs has ath9k's hardware TX counters, the strongest proof a frame left the radio.
 if [ -d /sys/kernel/debug ] && ! mountpoint -q /sys/kernel/debug 2>/dev/null; then
   mount -t debugfs none /sys/kernel/debug 2>/dev/null \
     && echo "mounted debugfs (for ath9k hardware TX counters)"
@@ -87,8 +76,6 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# Fresh monitor interface every run: a stale one may be left on the wrong channel or in a
-# half-configured state from a previous aborted run.
 iw dev "$MON" del 2>/dev/null
 if ! iw dev "$IFACE" interface add "$MON" type monitor; then
   echo "could not create $MON on $IFACE"
@@ -96,8 +83,7 @@ if ! iw dev "$IFACE" interface add "$MON" type monitor; then
 fi
 ip link set "$MON" up || { echo "could not bring $MON up"; exit 1; }
 
-# The parent interface being up alongside a monitor interface makes some drivers fight over the
-# channel. Take it down; cleanup restores NetworkManager, which brings it back.
+# Some drivers fight over the channel if the parent interface stays up.
 ip link set "$IFACE" down 2>/dev/null
 
 echo "regulatory domain: $(iw reg get 2>/dev/null | sed -n 's/^country /  country /p' | head -1)"

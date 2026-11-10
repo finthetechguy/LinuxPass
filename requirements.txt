@@ -1,19 +1,10 @@
-# LinuxPass has NO required third-party packages. The daemon, the handshake, the CCMP
-# crypto and every self-test run on the standard library alone -- sp_aes.py is a
-# pure-Python AES-128/CCM implementation used whenever a faster backend is absent.
-#
-# These are optional. Install them for speed, for pcap analysis, or for the GUI.
+# No third-party package is required. These are optional.
 
-# Faster AES. Everything works without it; sp_aes.py takes over automatically.
+# Faster AES.
 pycryptodome>=3.15 ; extra == "fast"
 
-# Reading packet captures: tools/sp_report.py, tools/sp_diag.py, and the --replay
-# paths of sp_link.py and sp_probe_tx.py. Not needed to run a StreetPass.
+# Reading packet captures.
 scapy>=2.5 ; extra == "pcap"
 
-# The GTK4 / libadwaita GUI. Install PyGObject from your distribution's packages
-# rather than pip where you can -- it needs the GTK and libadwaita libraries too:
-#   Debian/Ubuntu  apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1
-#   Fedora         dnf install python3-gobject gtk4 libadwaita
-#   Arch           pacman -S python-gobject gtk4 libadwaita
+# The GUI. Prefer your distribution's package, because it needs GTK and libadwaita too.
 PyGObject>=3.42 ; extra == "gui"
