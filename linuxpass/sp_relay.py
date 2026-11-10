@@ -2410,7 +2410,7 @@ def main():
                           'ON BY DEFAULT, with --repeat-type 0xf2 -- see --no-silent-recovery')
     run.add_argument('--repeat-type', default='0xf2', metavar='HEX',
                      help='what --manifest-repeat sends (default 0xf2, the SCAN probe). 0x81 and '
-                          '0x33 were both built and measured and do NOT work -- SILENT_SEND.md')
+                          '0x33 were both built and measured and do NOT work.')
     run.add_argument('--no-silent-recovery', dest='silent_recovery', action='store_false',
                      help='turn the 0xF2 silent-send recovery OFF. About one exchange in three '
                           'negotiates fully and then never opens a connection, delivering nothing '

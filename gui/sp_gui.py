@@ -516,7 +516,7 @@ class EncountersPage(Page):
         g = self.group('Encounters', '%d recorded, newest first. Every console that exchanged.' % len(enc))
         if not enc:
             g.add(row('Nothing yet',
-                      'A console has to be in sleep mode, in range, and past its own StreetPass '
+                      'A console has to be in range and past its own StreetPass '
                       'rate limit before it will engage.'))
             return
         for e in enc:
@@ -653,7 +653,7 @@ class InboxPage(StorePage):
 
     def header(self, st, titles):
         g = self.group('Received from consoles',
-                       'CEC data which has been recieved by consoles with successful exchanges.')
+                       'CEC data received from consoles in successful exchanges.')
         if not titles:
             g.add(row('Nothing received yet', 'Messages land here after an exchange.'))
 

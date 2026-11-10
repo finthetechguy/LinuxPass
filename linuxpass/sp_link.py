@@ -2056,7 +2056,7 @@ def build_parser():
                          'silent-send recovery. About a third of exchanges negotiate fully and '
                          'then never open a connection, delivering nothing in either direction, '
                          'and a synthesised 0xF2 makes cecd rescan and re-engage -- measured '
-                         '20/20 recoveries against 0/15 unprobed. See SILENT_SEND.md. Pass 0 to '
+                         '20/20 recoveries against 0/15 unprobed. Pass 0 to '
                          'disable.')
     ap.add_argument('--repeat-type', default='0xf2', metavar='HEX',
                     help='what --manifest-repeat sends (default 0xf2, a synthesised SCAN probe: '
