@@ -37,13 +37,13 @@ case "$DRIVER" in
     echo
     echo "############################################################################"
     echo "# WARNING: $DRIVER. The MT7902 has never been shown to inject."
-    echo "#   sp_injtest sent 154 frames from this chip while an ath9k receiver sat on"
-    echo "#   the same channel a metre away and caught ZERO of them. Its MAC is behind"
-    echo "#   vendor firmware. Run this on the ath9k box instead."
-    echo "#   Continuing anyway in 5 s -- rung 0 (TX proof) will tell you either way."
+    echo "#   An injection test sent 154 frames from this chip, and an ath9k receiver"
+    echo "#   on the same channel a metre away caught none of them. Its MAC runs in"
+    echo "#   vendor firmware. Use an ath9k card instead."
+    echo "#   Continuing in 5 s. Rung 0 (TX proof) will show whether it transmits."
     echo "############################################################################"
     sleep 5 ;;
-  *) echo "  (untested driver -- rung 0 will report whether it transmits)" ;;
+  *) echo "  (untested driver; rung 0 will report whether it transmits)" ;;
 esac
 
 # debugfs has ath9k's hardware TX counters, the strongest proof a frame left the radio.
@@ -54,7 +54,7 @@ fi
 if ls /sys/kernel/debug/ieee80211/*/ath9k/xmit >/dev/null 2>&1; then
   echo "ath9k hardware TX counters: available"
 else
-  echo "ath9k hardware TX counters: NOT available (will use netdev tx_packets instead)"
+  echo "ath9k hardware TX counters: not available (will use netdev tx_packets instead)"
 fi
 
 NM_WAS_ACTIVE=0
@@ -87,7 +87,7 @@ ip link set "$MON" up || { echo "could not bring $MON up"; exit 1; }
 ip link set "$IFACE" down 2>/dev/null
 
 echo "regulatory domain: $(iw reg get 2>/dev/null | sed -n 's/^country /  country /p' | head -1)"
-echo "  (channels 1/6/11 are legal everywhere -- no reg change needed for Stage 1)"
+echo "  (channels 1/6/11 are legal everywhere, so Stage 1 needs no regulatory change)"
 echo
 
 "$PY" "$ROOT/linuxpass/sp_probe_tx.py" --iface "$MON" --channels "$CHANS" "$@"

@@ -69,7 +69,7 @@ def mk_frame(key, payload, pn, a1, a2, a3):
 
 def main():
     if lp_keys.selftest_keys():
-        print("  (no console keys found -- running on generated throwaway keys)")
+        print("  (no console keys found, so running on generated throwaway keys)")
     print("=== 1. container parse (synthetic plaza message) ===")
     msg = build_plaza_message()
     m = sp_cec.parse_message(msg)

@@ -302,7 +302,7 @@ class Runner:
             self.log('      token: %s' % inf['token'])
 
     def phase_listen(self, ch, secs):
-        self.banner('LISTEN  ch %d  %.0f s  -- learn the consoles live session MACs' % (ch, secs))
+        self.banner("LISTEN  ch %d  %.0f s: learn the consoles' live session MACs" % (ch, secs))
         self.pump(time.time() + secs)
         if not self.consoles:
             self.log('  no console probes heard on ch %d' % ch)
@@ -312,7 +312,7 @@ class Runner:
 
     def phase_ack(self, ch, secs):
         """Rung 1a: react to console probes with a directed probe and watch for the ACK."""
-        self.banner('RUNG 1a  ch %d  %.0f s  -- directed probe -> expect a hardware ACK' % (ch, secs))
+        self.banner('RUNG 1a  ch %d  %.0f s: directed probe -> expect a hardware ACK' % (ch, secs))
         self.log('  our MAC %s   (an ACK to this MAC can only come from a device that heard us)'
                  % macstr(self.src))
         before, csrc = read_tx_counters(self.a.iface)
@@ -341,7 +341,7 @@ class Runner:
 
     def phase_engage(self, ch, secs):
         """Rung 1b. Advertise ourselves as a StreetPass peer and wait to be engaged."""
-        self.banner('RUNG 1b  ch %d  %.0f s  -- broadcast StreetPass probe -> expect a response'
+        self.banner('RUNG 1b  ch %d  %.0f s: broadcast StreetPass probe -> expect a response'
                     % (ch, secs))
         self.log('  token %s   services %s'
                  % (self.token.hex(), ['%08x' % s[0] for s in self.services]))
@@ -363,8 +363,8 @@ class Runner:
     def report_tx(self, before, after, csrc):
         d = diff_counters(before, after)
         if not d:
-            self.log('  TX COUNTERS DID NOT MOVE -- the radio may not be transmitting at all.')
-            self.log('    Treat any negative result below as UNPROVEN until this is fixed.')
+            self.log('  TX counters did not move, so the radio may not be transmitting at all.')
+            self.log('    Treat any negative result below as unproven until this is fixed.')
             return False
         self.log('  TX proof (%s):' % (csrc or 'unknown'))
         for k, v in sorted(d.items(), key=lambda kv: -abs(kv[1]))[:8]:
@@ -385,7 +385,7 @@ class Runner:
                  % (self.sent['broadcast'], self.sent['directed']))
         self.log('')
         if acks:
-            self.log('  RUNG 1a PASS -- %d ACK(s) addressed to us.' % len(acks))
+            self.log('  RUNG 1a PASS: %d ACK(s) addressed to us.' % len(acks))
             self.log('     A console received a frame we transmitted and its MAC layer answered.')
             self.log('     Injection, addressing, channel and rate are all proven good.')
         else:
@@ -395,7 +395,7 @@ class Runner:
         self.log('')
         if engages:
             kinds = sorted({e['name'] for e in engages})
-            self.log('  RUNG 1b PASS -- a console ENGAGED us: %s' % ', '.join(kinds))
+            self.log('  RUNG 1b PASS: a console engaged us (%s)' % ', '.join(kinds))
             for e in engages:
                 self.log('      %+8.3fs  %-12s from %s%s'
                          % (e['t'], e['name'], e['from'],
@@ -405,20 +405,20 @@ class Runner:
                 self.log('')
                 self.log('     The response names channel %s. That is the link channel, announced'
                          % ds[0])
-                self.log('     by the console -- the value we could never pin down statically.')
+                self.log('     by the console.')
             self.log('')
-            self.log('     This is the result that matters: a real console treated a frame built')
+            self.log('     A real console treated a frame built')
             self.log('     from our reconstruction as a genuine StreetPass peer advertisement.')
         else:
             self.log('  RUNG 1b no engagement.')
             if acks:
-                self.log('     But 1a passed, so the radio path is PROVEN. The problem is in what')
-                self.log('     we send, not whether it arrives -- bisect the probe fields next')
+                self.log('     But 1a passed, so the radio path works. The problem is in what')
+                self.log('     we send. Try changing the probe fields next')
                 self.log('     (--full-services, --mac, token, rate).')
         return 0 if (acks or engages) else 1
 
     def run(self):
-        self.banner('STAGE 1  --  make a 3DS react to us')
+        self.banner('STAGE 1: make a 3DS react to us')
         self.log('  interface %s   channels %s   our MAC %s'
                  % (self.a.iface, self.a.channels, macstr(self.src)))
         self.log('  token %s' % self.token.hex())
@@ -427,7 +427,7 @@ class Runner:
         acks, engages = [], []
         for ch in self.a.channels:
             if not tune(self.a.iface, ch, self.log):
-                self.log('  cannot tune ch %d -- skipping' % ch)
+                self.log('  cannot tune ch %d, skipping' % ch)
                 continue
             self.log('')
             self.log('### channel %d (%d MHz) confirmed by readback' % (ch, iface_freq(self.a.iface)))
@@ -611,7 +611,7 @@ def main():
                           sp_parse.build_directed_probe(r.src, peer, seq=2)),
                          ('action frame',
                           sp_parse.build_action(r.src, peer, seq=3))):
-            print('\n%s  (%d bytes, no FCS -- the radio appends it)' % (name, len(fr)))
+            print('\n%s  (%d bytes, no FCS; the radio appends it)' % (name, len(fr)))
             for o in range(0, len(fr), 16):
                 print('   %04x  %-47s |%s|'
                       % (o, ' '.join('%02x' % c for c in fr[o:o + 16]),

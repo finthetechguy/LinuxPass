@@ -154,7 +154,7 @@ def report(blob, plant=PLANT, tol=TOL, out=sys.stdout):
     if n_fwd == 0:
         p('  -> NONE of the planted MACs appear in this file.')
         p('     Either this is not the filter that was written, or entries are not stored as')
-        p('     plain MACs. Do not guess further from here -- dump the surrounding bytes.')
+        p('     plain MACs. Do not guess further from here. Dump the surrounding bytes.')
         return None
 
     found = []
@@ -189,7 +189,7 @@ def report(blob, plant=PLANT, tol=TOL, out=sys.stdout):
     if stride is None:
         p('stride: indeterminate (need >= 2 entries)')
         return None
-    p('stride: %d bytes%s' % (stride, '' if consistent else '  (NOT constant -- see diffs)'))
+    p('stride: %d bytes%s' % (stride, '' if consistent else '  (not constant; see diffs)'))
     if not consistent:
         p('  offset diffs: %s' % [b - a for a, b in zip(offs, offs[1:])])
     p('first entry begins at 0x%04X, so the header is %d bytes' % (offs[0], offs[0]))

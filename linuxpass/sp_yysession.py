@@ -147,7 +147,7 @@ class YYSession:
         self.segs = [seg for seg in segment(self.tx_obj) if seg[1] + len(seg[2]) > self.tx_acked]
         self.tx_seq = self.tx_acked
         self.last_progress = time.time()
-        self.log('  RETRANSMIT object %d from %#x (%d of %d B acknowledged, %d segment(s)) -- %s'
+        self.log('  RETRANSMIT object %d from %#x (%d of %d B acknowledged, %d segment(s)): %s'
                  % (self.idx_tx, self.tx_acked, self.tx_acked, len(self.tx_obj),
                     len(self.segs), why))
         return True
@@ -181,7 +181,7 @@ class YYSession:
         # A non-zero seq on an empty buffer is the peer resending its last END, so repeat the ACK.
         if y['payload_len'] > 0 and not self.rx_buf and y['seq'] > 0 and self.role != 'recv':
             self.stats['dup_tails'] += 1
-            self.log('  peer repeated the tail of object %d (seq %#x) -- re-ACKing %d B'
+            self.log('  peer repeated the tail of object %d (seq %#x); re-ACKing %d B'
                      % (len(self.received) - 1, y['seq'], self.rx_done_len))
             if f & sp_yy.URG:
                 self._emit(sp_yy.ACK, 0, self.rx_done_len)
@@ -198,7 +198,7 @@ class YYSession:
                 # As cecd does: drop the segment, repeat the unchanged ACK, and remember the hole.
                 self.rx_gap = True
                 self.stats['gaps'] += 1
-                self.log('  gap in peer data: expected %d, got %d -- duplicate-ACKing %d'
+                self.log('  gap in peer data: expected %d, got %d; duplicate-ACKing %d'
                          % (len(self.rx_buf), y['seq'], len(self.rx_buf)))
                 self._emit(sp_yy.ACK, 0, len(self.rx_buf))
             if f & sp_yy.URG:
@@ -206,15 +206,15 @@ class YYSession:
                 if not self._object_complete() and self.rx_expect is not None \
                         and len(self.rx_buf) < self.rx_expect and self.rx_gap:
                     self.stats['short_holds'] += 1
-                    self.log('  object %d is %d B of a declared %d B and something was lost -- '
-                             'NOT completing it, waiting for the retransmission'
+                    self.log('  object %d is %d B of a declared %d B and something was lost; '
+                             'holding it until the retransmission arrives'
                              % (len(self.received), len(self.rx_buf), self.rx_expect))
                 if self._object_complete():
                     # Take exactly the declared length, so a peer cannot append junk.
                     obj = (bytes(self.rx_buf[:self.rx_expect]) if self.rx_expect is not None
                            else bytes(self.rx_buf))
                     if self.rx_expect is not None and len(self.rx_buf) > self.rx_expect:
-                        self.log('  object %d overshot its declared length by %d B -- trimmed'
+                        self.log('  object %d overshot its declared length by %d B; trimmed'
                                  % (len(self.received), len(self.rx_buf) - self.rx_expect))
                     self.received.append(obj)
                     self.stats['recv_objects'] += 1
@@ -223,8 +223,8 @@ class YYSession:
                              % (len(self.received) - 1, len(obj)))
                     if self.repeats_done and not self.repeat_worked:
                         self.repeat_worked = True
-                        self.log('  *** the peer answered only AFTER %d repeat(s) of our 0x81 '
-                                 '-- its send thread was asleep, not absent ***'
+                        self.log('  *** the peer answered only after %d repeat(s) of our 0x81; '
+                                 'its send thread had been asleep ***'
                                  % self.repeats_done)
                     if self.on_received:
                         try:
@@ -274,13 +274,13 @@ class YYSession:
             if self.syn_resends >= MAX_RESENDS:
                 if self.syn_resends == MAX_RESENDS:
                     self.syn_resends += 1
-                    self.log('  no SYN|ACK for object %d after %d attempt(s) -- giving up on it'
+                    self.log('  no SYN|ACK for object %d after %d attempt(s); giving up on it'
                              % (self.idx_tx, MAX_RESENDS))
                 return False
             self.syn_resends += 1
             self.stats['syn_resends'] += 1
             self.syn_at = time.time()
-            self.log('  no SYN|ACK for object %d in %.0f ms -- repeating the SYN (%d)'
+            self.log('  no SYN|ACK for object %d in %.0f ms; repeating the SYN (%d)'
                      % (self.idx_tx, RETRANSMIT_AFTER * 1000, self.syn_resends))
             return self._emit(sp_yy.SYN, 0, 0)
         if (self.role == 'send' and self.tx_obj and self.tx_seq > self.tx_acked
@@ -293,7 +293,7 @@ class YYSession:
         if time.time() - self.idle_since < idle_timeout:
             return False
         self.idle_since = None
-        self.log('  peer did not open a connection in %.0f ms -- continuing on our own'
+        self.log('  peer did not open a connection in %.0f ms; continuing on our own'
                  % (idle_timeout * 1000))
         self._maybe_repeat_manifest()
         return self.start_send()
@@ -312,8 +312,8 @@ class YYSession:
         self.stats['manifest_repeats'] += 1
         self.outbox.insert(self.idx_tx, obj)
         self.repeat_slot = self.idx_tx
-        self.log('  the peer answered our 0x81 with nothing -- repeating a %d B object '
-                 '(attempt %d of %d)' % (len(obj), self.repeats_done, self.repeat_max))
+        self.log('  the peer answered our 0x81 with nothing; repeating a %d B object (attempt '
+                 '%d of %d)' % (len(obj), self.repeats_done, self.repeat_max))
 
     def _object_complete(self):
         """Is the object in `rx_buf` finished?"""

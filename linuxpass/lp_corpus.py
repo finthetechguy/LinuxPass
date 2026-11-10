@@ -124,7 +124,7 @@ def vector(name):
 
 def why_skipped():
     """One line explaining an absent corpus, for a self-test to print once."""
-    return ('no test corpus found (set $%s, or put one in %s) -- hardware regression checks '
+    return ('no test corpus found (set $%s, or put one in %s); hardware regression checks '
             'skipped' % (ENV, _config_dir()))
 
 

@@ -278,8 +278,8 @@ class HomePage(Page):
         if unit.get('UnitFileState'):
             g.add(row('Starts at boot', unit['UnitFileState']))
         if unit.get('NRestarts', '0') not in ('0', ''):
-            g.add(row('Automatic restarts', '%s since it was last started by hand — the watchdog '
-                                            'restarts the service, never the machine'
+            g.add(row('Automatic restarts', '%s since it was last started by hand. The watchdog '
+                                            'restarts only the service.'
                       % unit['NRestarts']))
         return active
 
@@ -356,12 +356,12 @@ class HomePage(Page):
             return
         s = st['status']
 
-        g = self.group('Exchanges', 'The service can be running with exchanges held off. '
-                                    'This switch is instant and needs no privileges.')
+        g = self.group('Exchanges', 'Holds off exchanges while the service keeps running. This '
+                                    'takes effect at once and needs no privileges.')
         sw = Gtk.Switch(active=s['enabled'], valign=Gtk.Align.CENTER)
         sw.connect('state-set', self._toggle)
         r = row('Exchange with consoles that pass',
-                'listening' if s['enabled'] else 'paused — probes still go out, nothing is served')
+                'listening' if s['enabled'] else 'paused: probes still go out, nothing is served')
         r.add_suffix(sw)
         r.set_activatable_widget(sw)
         g.add(r)
@@ -388,12 +388,12 @@ class HomePage(Page):
     @staticmethod
     def _identity_mode(s):
         if s.get('rotate_identity'):
-            return 'a new MAC every pass — no real console can do this'
+            return 'a new MAC every pass, which no real console can do'
         every = int(s.get('rotate_every_s') or 0)
         if not every:
             return 'fixed, derived from the store path'
         held = human_secs(s.get('identity_age_s') or 0)
-        return 'on a timer — this one has been in use for %s (%d change(s) so far)' \
+        return 'on a timer: this one has been in use for %s (%d change(s) so far)' \
                % (held, s.get('rotations') or 0)
 
     def _rotation_row(self, s):
@@ -408,14 +408,14 @@ class HomePage(Page):
         if s.get('rotate_identity'):
             sub = '--rotate-identity is on, which overrides this'
         elif not cur:
-            sub = 'one exchange per console, ever — it blocks this MAC once it is done'
+            sub = 'one exchange per console, ever: it blocks this MAC once it is done'
         else:
             nxt = s.get('next_rotation_s')
             sub = ('at the end of this listening pass' if nxt == 0
                    else 'next change in %s' % human_secs(nxt)) if nxt is not None else 'on'
             cd = s.get('cooldown_s') or 0
             if cd and cur < cd:
-                sub += ' — but our own %s cooldown still holds off a console we have met' \
+                sub += ', but our own %s cooldown still holds off a console we have met' \
                        % human_secs(cd)
         r = row('Change the MAC', sub)
         dd = Gtk.DropDown.new_from_strings(labels)
@@ -457,7 +457,7 @@ class EncountersPage(Page):
         was_open = self.remember_open()
         self.reset()
         enc = list(reversed(rep['encounters']))
-        g = self.group('Encounters', '%d recorded, newest first. Every console that exchanged.' % len(enc))
+        g = self.group('Encounters', '%d recorded, newest first.' % len(enc))
         if not enc:
             g.add(row('Nothing yet',
                       'A console has to be in range and past its own StreetPass '
@@ -468,11 +468,11 @@ class EncountersPage(Page):
             res_txt = e.get('result', '?')
             sent, got = e.get('sent') or [], e.get('received') or []
             if res_txt == 'exchanged':
-                sub = '%s   —   sent %d (%s), received %d (%s)' % (
+                sub = '%s   ·   sent %d (%s), received %d (%s)' % (
                     when, len(sent), human_bytes(sum(x.get('bytes', 0) for x in sent)),
                     len(got), human_bytes(sum(x.get('bytes', 0) for x in got)))
             else:
-                sub = '%s   —   %s' % (when, res_txt)
+                sub = '%s   ·   %s' % (when, res_txt)
             ex = self.expander('%s/%s' % (e.get('when'), e.get('peer')),
                                title=e.get('peer', '?'), subtitle=sub)
             ic = Gtk.Image(icon_name={
@@ -626,13 +626,13 @@ class DenylistPage(Page):
         self.reset()
 
         g = self.group('Blocked consoles',
-                       'Never exchanged with. Unlike a cooldown this is a '
-                       'refusal, not a delay.')
+                       'LinuxPass refuses to exchange with these consoles until you unblock '
+                       'them. A cooldown only delays the next exchange.')
         b = Gtk.Button(label='Block a console…', halign=Gtk.Align.END, margin_bottom=6)
         b.connect('clicked', lambda *_a: self.app.dialog_block())
         g.set_header_suffix(b)
         if not rep['blocked']:
-            g.add(row('Nothing blocked', 'Consoles are free to exchange with.'))
+            g.add(row('Nothing blocked', 'Every console can exchange with this relay.'))
         for e in rep['blocked']:
             r = row(e['mac'], e.get('note') or 'blocked %s'
                     % time.strftime('%d %b %H:%M', time.localtime(e.get('when', 0))))
@@ -641,9 +641,9 @@ class DenylistPage(Page):
             g.add(r)
 
         g = self.group('Cooldowns',
-                       'After an exchange a console is left alone for a while. Note this is keyed '
-                       'on its MAC, which a 3DS rotates, the limit that really holds is the '
-                       'console\'s own, keyed on ours.')
+                       'After an exchange, a console is left alone for a while. This is keyed '
+                       "on its MAC, which a 3DS rotates. The console's own limit is keyed on "
+                       'our MAC and is the stricter one.')
         if not rep['cooldowns']:
             g.add(row('No consoles met yet', ''))
         for e in rep['cooldowns']:
@@ -813,9 +813,9 @@ class RelayApp(Adw.Application):
     def confirm_remove_title(self, t):
         d = Adw.AlertDialog(
             heading='Remove %s?' % (t['name'] or t['title']),
-            body='This deletes its %d message(s), its display name and its HMAC key.\n\n'
-                 'The key came from a console dump and there is no other copy here — you would '
-                 'have to import that dump again to get it back.' % len(t['messages']))
+            body='This deletes its %d message(s), its display name and its HMAC key.\n\nThe key '
+                 'came from a console dump and there is no other copy here. To get it back, '
+                 'import that dump again.' % len(t['messages']))
         d.add_response('cancel', 'Cancel')
         d.add_response('del', 'Remove title')
         d.set_response_appearance('del', Adw.ResponseAppearance.DESTRUCTIVE)
@@ -830,7 +830,7 @@ class RelayApp(Adw.Application):
         box.append(e)
         box.append(n)
         d = Adw.AlertDialog(heading='Block a console',
-                            body='It will never be served, whatever else is true.')
+                            body='It will never be served.')
         d.set_extra_child(box)
         d.add_response('cancel', 'Cancel')
         d.add_response('ok', 'Block')
@@ -881,8 +881,8 @@ class RelayApp(Adw.Application):
         ab.append(Gtk.Label(
             xalign=0, wrap=True, css_classes=['dim-label'],
             label='Derived from the store path and not editable: MAC %s, Mii id %08x, face %d, '
-                  'hat %d, dream %d, hobby %d. The Mii\'s creator MAC is the MAC this relay '
-                  'transmits from — they are the same value on purpose.'
+                  "hat %d, dream %d, hobby %d. The Mii's creator MAC is the MAC this relay "
+                  'transmits from.'
                   % (ident['mac'], ident['mii_id'], ident['face_shape'], ident['hat'],
                      ident['dream'], ident['hobby'])))
         adv.set_child(ab)
@@ -890,8 +890,8 @@ class RelayApp(Adw.Application):
 
         d = Adw.AlertDialog(
             heading='Author this relay\'s Mii Plaza identity',
-            body='Builds a Mii Plaza message from nothing — no captured data — and replaces the '
-                 'one in the outbox.')
+            body='Builds a Mii Plaza message without any captured data and replaces the one in '
+                 'the outbox.')
         d.set_extra_child(rows)
         d.add_response('cancel', 'Cancel')
         d.add_response('ok', 'Write it')

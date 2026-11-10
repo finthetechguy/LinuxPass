@@ -27,8 +27,8 @@ def extract_cecd(path, offset=None):
         dev_off = data.find(DEV_NEEDLE)
         if dev_off < 0:
             raise SystemExit(
-                'error: %s does not look like a decrypted cecd code.bin -- the development\n'
-                '       key string is not in it. Is the module still encrypted?' % path)
+                'error: %s does not look like a decrypted cecd code.bin: the '
+                'development\n       key string is not in it. Is the module still encrypted?' % path)
         if data.find(DEV_NEEDLE, dev_off + 1) >= 0:
             print('warning: more than one candidate found; using the first at %#x' % dev_off,
                   file=sys.stderr)
@@ -86,7 +86,7 @@ def extract_cec_store(path):
 
 
 def render(values):
-    lines = ['# linuxpass.keys -- constants read out of your own console dumps.',
+    lines = ['# linuxpass.keys: constants read out of your own console dumps.',
              '# Written by tools/lp_extract_keys.py. Treat this file as private:',
              '# it is console-derived material and must never be committed or shared.',
              '']
@@ -104,11 +104,11 @@ def main(argv=None):
         description='Write linuxpass.keys from your own console dumps.',
         epilog='Run with no source and it just reports what LinuxPass can currently find.')
     ap.add_argument('--cecd', metavar='CODE_BIN',
-                    help='decrypted cecd code.bin -- supplies the CCMP HMAC key strings')
+                    help='decrypted cecd code.bin, which supplies the CCMP HMAC key strings')
     ap.add_argument('--cecd-offset', type=lambda s: int(s, 0), metavar='OFF',
                     help='file offset of the retail key, if the search cannot find it')
     ap.add_argument('--cec-store', metavar='PATH',
-                    help='a CEC SAVE image or extracted store -- supplies title HMAC keys')
+                    help='a CEC SAVE image or extracted store, which supplies title HMAC keys')
     ap.add_argument('-o', '--output', metavar='PATH',
                     help='where to write (default: ~/.config/linuxpass/linuxpass.keys)')
     ap.add_argument('--stdout', action='store_true', help='print instead of writing a file')
@@ -119,7 +119,7 @@ def main(argv=None):
         ok, report = keys.status()
         print('\n'.join(report))
         print('\n%s' % ('all key material present' if ok else
-                        'incomplete -- pass --cecd and/or --cec-store to fill the gaps'))
+                        'incomplete: pass --cecd and/or --cec-store to fill the gaps'))
         return 0 if ok else 1
 
     values = {}

@@ -85,7 +85,7 @@ def _selftest():
     ok = tot = 0
     import lp_keys as _k
     if _k.selftest_keys():
-        print('  (no console keys found -- running on generated throwaway keys)')
+        print('  (no console keys found, so running on generated throwaway keys)')
 
     def chk(n, c, g=''):
         nonlocal ok, tot

@@ -111,7 +111,8 @@ def slot(number, half, explicit=None):
     ks = aes_keys(explicit)
     if name not in ks:
         raise _missing('keyslot %s' % name, AES_KEYS_FILE,
-                       'Re-dump aes_keys.txt with GodMode9 -- the dump you have is missing this slot.',
+                       'Re-dump aes_keys.txt with GodMode9. The dump you have is missing this '
+                       'slot.',
                        explicit)
     return ks[name]
 
@@ -232,7 +233,7 @@ def install_test_keys(directory, seed=0x1105):
         return bytes(rnd.getrandbits(8) for _ in range(n)).hex()
 
     os.makedirs(directory, exist_ok=True)
-    lines = ['# THROWAWAY self-test keys -- generated, not real. See lp_keys.install_test_keys.']
+    lines = ['# THROWAWAY self-test keys: generated, not real. See lp_keys.install_test_keys.']
     for n in (0x2C, 0x2D, 0x2E, 0x2F, 0x31):
         lines.append('slot0x%02XKeyX=%s' % (n, hx(16)))
         lines.append('slot0x%02XKeyY=%s' % (n, hx(16)))
@@ -240,7 +241,7 @@ def install_test_keys(directory, seed=0x1105):
         fh.write('\n'.join(lines) + '\n')
 
     with open(os.path.join(directory, CONSTANTS_FILE), 'w') as fh:
-        fh.write('# THROWAWAY self-test constants -- generated, not real.\n'
+        fh.write('# THROWAWAY self-test constants: generated, not real.\n'
                  'cecd_hmac_retail = "LinuxPassSelfTes"\n'
                  'cecd_hmac_dev    = "LinuxPassSelfDev"\n'
                  'title_hmac_%08X = %s\n'
@@ -293,5 +294,5 @@ if __name__ == '__main__':
     good, report = status()
     print('\n'.join(report))
     print('\n%s' % ('all key material present' if good
-                    else 'incomplete -- see the wiki page "Getting your keys"'))
+                    else 'incomplete: see the wiki page "Getting your keys"'))
     sys.exit(0 if good else 1)

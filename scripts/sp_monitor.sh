@@ -66,7 +66,7 @@ up)
       echo "no such wireless interface: $IFACE, and no ath9k adapter to use instead"
       iw dev | sed -n 's/^\tInterface /  /p'; exit 1
     fi
-    echo "WARNING: no such wireless interface: $IFACE -- falling back to $ALT"
+    echo "WARNING: no such wireless interface: $IFACE, falling back to $ALT"
     echo "         pin it with SP_IFACE=$ALT if this is the adapter you want"
     IFACE=$ALT
   fi

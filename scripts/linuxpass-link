@@ -37,14 +37,14 @@ arm_deadman() {
       && DEADMAN_ARMED=1
   fi
   [ "$DEADMAN_ARMED" -eq 1 ] \
-    && echo "deadman reboot ARMED (+${DEADMAN_MIN} min) -- cancelled automatically on clean exit" \
-    || echo "WARNING: could not arm the deadman reboot; a driver wedge would need physical access"
+    && echo "forced reboot armed (+${DEADMAN_MIN} min); cancelled automatically on a clean exit" \
+    || echo "WARNING: could not arm the forced reboot, so a driver hang would need physical access"
 }
 disarm_deadman() {
   [ "$DEADMAN_ARMED" -eq 1 ] || return 0
   systemctl stop sp-deadman.timer >/dev/null 2>&1
   systemctl reset-failed sp-deadman.service >/dev/null 2>&1
-  echo "deadman reboot cancelled"
+  echo "forced reboot cancelled"
 }
 
 NM_WAS_ACTIVE=0

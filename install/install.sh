@@ -89,7 +89,7 @@ EOF
   if [ -n "$GUI_USER" ] && [ -d /etc/polkit-1/rules.d ] && [ -f "$HERE/50-linuxpass.rules.in" ]; then
     sed -e "s|__GUI_USER__|$GUI_USER|g" "$HERE/50-linuxpass.rules.in" > "$POLKIT"
     chmod 0644 "$POLKIT"
-    echo "wrote $POLKIT  (lets $GUI_USER manage ONLY linuxpass.service)"
+    echo "wrote $POLKIT  (lets $GUI_USER manage only linuxpass.service)"
   else
     echo "NOTE: no polkit rule written; the GUI will need a polkit agent to start/stop the service"
   fi
@@ -115,7 +115,7 @@ EOF
     done
   fi
   if [ ! -f "$KEYDIR/aes_keys.txt" ]; then
-    echo "NOTE: no $KEYDIR/aes_keys.txt -- the daemon will not derive a link key."
+    echo "NOTE: no $KEYDIR/aes_keys.txt, so the daemon will not derive a link key."
     echo "      See the wiki page \"Getting your keys\"."
   fi
 

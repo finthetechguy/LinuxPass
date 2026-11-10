@@ -479,7 +479,7 @@ def _selftest():
 
     import lp_corpus as corpus, lp_keys as _k
     if _k.selftest_keys():
-        print('  (no console keys found -- running on generated throwaway keys)')
+        print('  (no console keys found, so running on generated throwaway keys)')
     msg = build(mii_name='Linux', author_name='LinuxPass', greeting='Built from zero',
                 creator_mac='b8:ae:6e:11:22:33', message_id=0x0123456789ABCDEF)
 

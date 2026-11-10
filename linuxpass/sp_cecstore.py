@@ -264,7 +264,7 @@ def _selftest():
 
     import lp_corpus as corpus, lp_keys as _k
     if _k.selftest_keys():
-        print('  (no console keys found -- running on generated throwaway keys)')
+        print('  (no console keys found, so running on generated throwaway keys)')
     pa = corpus.path('console_nand_3') or corpus.path('console_nand') or ''
     if os.path.exists(pa):
         _fs = sp_savefs.SaveFS(open(pa, 'rb').read())

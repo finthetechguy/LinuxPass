@@ -159,18 +159,18 @@ def report(path):
     convo = Counter()
     for a1, a2, ln, hx in exch:
         convo[frozenset((a1, a2))] += 1
-    print(f"\n[8] PROTECTED DATA — EXCHANGE CANDIDATES: {len(exch)} of {len(prot_data)} protected frames")
+    print(f"\n[8] PROTECTED DATA, EXCHANGE CANDIDATES: {len(exch)} of {len(prot_data)} protected frames")
     if console_set:
         print(f"    console MACs (from Nintendo IE): {sorted(console_set)}")
     if convo:
         print("    conversations (MAC pair -> #protected frames):")
         for pair, n in convo.most_common():
             print(f"      {' <-> '.join(sorted(pair))}: {n}")
-        print("    sample MPDUs (first 48B, feed to sp_decrypt_pcap.py):")
+        print("    sample MPDUs (first 48B):")
         for a1, a2, ln, hx in exch[:6]:
             print(f"      {a2}->{a1} len={ln}: {hx}")
     else:
-        print("    (none — no protected data between consoles. Capture DURING the exchange on a")
+        print("    (none: no protected data between consoles. Capture DURING the exchange on a")
         print("     fixed channel; retry ch 1 -> 6 -> 11.)")
     print()
 

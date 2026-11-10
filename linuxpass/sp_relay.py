@@ -428,7 +428,7 @@ class Control:
             if not req.get('mac'):
                 return {'ok': False, 'error': 'block needs a mac'}
             r.book.block(req['mac'], req.get('note', ''))
-            r.log('  %s added to the denylist -- it will never be served' % req['mac'])
+            r.log('  %s added to the denylist; it will never be served' % req['mac'])
             return {'ok': True, 'blocked': req['mac']}
         if cmd == 'unblock':
             gone = r.book.unblock(req.get('mac', ''))
@@ -540,7 +540,7 @@ class Control:
                 self.sock.bind(addr)
         except OSError as e:
             self.failed = '%s: %s' % (type(e).__name__, e)
-            self.relay.log('  CONTROL SOCKET UNAVAILABLE at %s -- %s' % (self.path, self.failed))
+            self.relay.log('  CONTROL SOCKET UNAVAILABLE at %s: %s' % (self.path, self.failed))
             self.relay.log('  the daemon will keep exchanging, but nothing can pause or query it')
             return
         # Done before listen(), so nobody can connect while the permissions are still open.
@@ -664,8 +664,8 @@ class Relay:
             self.log('  ignoring --rotate-every %r: negative. Rotation is OFF.' % (raw,))
             return 0
         if 0 < n < MIN_ROTATE_SECONDS:
-            self.log('  --rotate-every %d is below the %d s floor; using %d. Rotating faster than '
-                     'a pass is pointless -- the identity only ever changes between passes.'
+            self.log('  --rotate-every %d is below the %d s floor; using %d. The identity only '
+                     'changes between passes, so rotating faster than a pass has no effect.'
                      % (n, MIN_ROTATE_SECONDS, MIN_ROTATE_SECONDS))
             return MIN_ROTATE_SECONDS
         return n
@@ -742,7 +742,7 @@ class Relay:
                      ['ip', 'link', 'set', self.a.iface, 'up']):
             r = subprocess.run(['timeout', '10'] + args, capture_output=True)
             if r.returncode != 0:
-                self.log('  could not set %s to %s (%s) -- keeping the current identity'
+                self.log('  could not set %s to %s (%s); keeping the current identity'
                          % (self.a.iface, mac, (r.stderr or b'').decode().strip()))
                 return False
         self._adopt(mac)
@@ -788,7 +788,7 @@ class Relay:
         want = self.identity.lower()
         if have == want:
             return True
-        self.log('  interface %s is %s but we transmit as %s -- realigning the interface'
+        self.log('  interface %s is %s but we transmit as %s; realigning the interface'
                  % (self.a.iface, have, want))
         if self.set_iface_mac(self.identity) and self.iface_mac() == want:
             self.log('  interface is now %s; the hardware will ACK frames addressed to us' % want)
@@ -944,12 +944,12 @@ class Relay:
         import sp_link
         if self.book.is_blocked(mac):
             r = self._decline(link, 'blocked',
-                              '  %s is on the denylist -- refusing to exchange with it' % mac)
+                              '  %s is on the denylist; refusing to exchange with it' % mac)
             self.note_encounter({'peer': mac, 'result': 'blocked'})
             return r
         if not self.book.due(mac):
             return self._decline(link, 'cooldown',
-                                 '  %s is inside its cooldown (%.0f s to go) -- serving it '
+                                 '  %s is inside its cooldown (%.0f s to go); serving it '
                                  'nothing so the next pass can reach a different console'
                                  % (mac, self.book.wait(mac)))
         titles = self.peer_titles(peer_services)
@@ -1079,7 +1079,7 @@ class Relay:
             return False
         self.book.note_attempt(peer)
         self.note_encounter({'peer': peer, 'result': 'engaged but nothing moved'})
-        self.log('  %s engaged but nothing moved -- backing off %.0f s, not the full cooldown'
+        self.log('  %s engaged but nothing moved; backing off %.0f s instead of the full cooldown'
                  % (peer, self.book.retry))
         return False
 
@@ -1146,8 +1146,8 @@ class Relay:
                     time.sleep(0.5)
                     continue
                 if self.iface_failures >= self.a.max_iface_failures:
-                    self.log('  %s has been unusable for %d passes -- exiting so the service '
-                             'restarts and rebuilds it. The MACHINE is not touched.'
+                    self.log('  %s has been unusable for %d passes; exiting so the service '
+                             'restarts and rebuilds it. The machine is not touched.'
                              % (self.a.iface, self.iface_failures))
                     self.last_error = 'monitor interface unusable; asked for a service restart'
                     rc_exit = 1
@@ -1212,7 +1212,7 @@ def _selftest():
     tmp = tempfile.mkdtemp()
     import lp_corpus as corpus, lp_keys as _k
     if _k.selftest_keys():
-        print('  (no console keys found -- running on generated throwaway keys)')
+        print('  (no console keys found, so running on generated throwaway keys)')
     try:
         st = sp_store.Store(os.path.join(tmp, 'store'))
         src = corpus.path('console_nand')
@@ -1983,34 +1983,32 @@ def main():
     run.add_argument('--idle', type=float, default=2.0, help='pause between passes')
     run.add_argument('--cooldown', type=float, default=DEFAULT_COOLDOWN,
                      help='seconds before the same console is engaged again, keyed on the '
-                          "PEER's MAC. This is OUR rate limit and it exists so we do not fill a "
-                          'console inbox (~8-9 per title) with duplicates of our own messages. It '
-                          "is NOT the console's MacFilter: that is a separate and much harder "
-                          'limit at the far end, keyed on OUR MAC, which this program cannot '
-                          'lift. An earlier version of this help said no such limit existed; that '
-                          'was wrong -- the run it rested on was rotating identity, so every pass '
-                          'presented a MAC the console had never seen.')
+                          "peer's MAC. This is our own rate limit, which stops us filling a "
+                          'console inbox (about 8 or 9 messages per title) with duplicates of '
+                          "our messages. The console's MacFilter is a separate, stricter limit "
+                          'on the far end, keyed on our MAC, and this program cannot lift it.')
     run.add_argument('--mac', default=None, help='override the fixed identity')
     run.add_argument('--rotate-every', default='0', metavar='SECONDS',
-                     help='present a new MAC every SECONDS (0 = never, the default; minimum %d). '
-                          'The change happens at a pass boundary, so it can never land inside an '
-                          'exchange, and it is persisted so a restart resumes the schedule instead '
-                          'of falling back to the fixed MAC that consoles have already blocked. '
-                          'This lifts the limit at the FAR end (the MacFilter). Ours is separate: '
-                          'a period shorter than --cooldown buys nothing against a console we have '
-                          'already met, because the peer book will still be holding it off.'
+                     help='present a new MAC every SECONDS (0 = never, the default; minimum '
+                          '%d). The change happens between passes, so it cannot land inside an '
+                          'exchange. The schedule is saved, so a restart resumes it and does '
+                          'not fall back to the fixed MAC that consoles have already blocked. '
+                          'This lifts the limit on the far end (the MacFilter). Our own '
+                          'cooldown is separate: a period shorter than --cooldown gains nothing '
+                          'against a console we have already met, because the peer book still '
+                          'holds it off.'
                           % MIN_ROTATE_SECONDS)
     run.add_argument('--rotate-identity', action='store_true',
-                     help='present a NEW MAC for every exchange. This defeats BOTH our own '
-                          "--cooldown and the peer console's MacFilter, which refuses any MAC it "
-                          'has already completed an exchange with and was measured still refusing '
-                          '18.1 h later (6 Sep 2026). On a fixed MAC the relay therefore gets one '
-                          'exchange per console per manual filter clear. Off by default because '
-                          'no real console rotates like this -- not because it does not work.')
+                     help='present a new MAC for every exchange. This gets past both our own '
+                          "--cooldown and the peer console's MacFilter, which refuses any MAC "
+                          'it has already completed an exchange with and was still refusing one '
+                          '18.1 h later (measured 6 Sep 2026). On a fixed MAC the relay gets '
+                          'one exchange per console each time the filter is cleared by hand. '
+                          'Off by default because no real console rotates like this.')
     run.add_argument('--exchange-gap', type=float, default=0.0,
-                     help='seconds to hold off after a COMPLETED exchange before engaging '
-                          'anything at all. Unlike the per-peer cooldown this does not depend on '
-                          'a MAC, which consoles rotate.')
+                     help='seconds to hold off after a completed exchange before engaging '
+                          'anything at all. Unlike the per-peer cooldown, this does not depend '
+                          'on a MAC, which consoles rotate.')
     run.add_argument('--max-iface-failures', type=int, default=3,
                      help='consecutive passes with an unusable monitor interface before exiting '
                           'non-zero, so the systemd unit restarts and rebuilds it')
@@ -2020,19 +2018,20 @@ def main():
     run.add_argument('--start-paused', action='store_true')
     run.add_argument('--yy-rate', type=float, default=11.0, metavar='MBPS',
                      help='802.11b rate for the encrypted payload frames (default 11, what two '
-                          'real consoles use to each other). Pass 1 for the old behaviour.')
+                          'real consoles use to each other). Pass 1 for more link margin.')
     run.add_argument('--manifest-repeat', type=int, default=1, metavar='N',
-                     help='how many times to poke a console that answered our 0x81 with nothing. '
-                          'ON BY DEFAULT, with --repeat-type 0xf2 -- see --no-silent-recovery')
+                     help='how many times to poke a console that answered our 0x81 with '
+                          'nothing. On by default with --repeat-type 0xf2; see '
+                          '--no-silent-recovery')
     run.add_argument('--repeat-type', default='0xf2', metavar='HEX',
-                     help='what --manifest-repeat sends (default 0xf2, the SCAN probe). 0x81 and '
-                          '0x33 were both built and measured and do NOT work.')
+                     help='what --manifest-repeat sends (default 0xf2, the SCAN probe). 0x81 '
+                          'and 0x33 were both built and tested and do not work.')
     run.add_argument('--no-silent-recovery', dest='silent_recovery', action='store_false',
-                     help='turn the 0xF2 silent-send recovery OFF. About one exchange in three '
-                          'negotiates fully and then never opens a connection, delivering nothing '
-                          'in either direction; the recovery costs a rescan of ~20-30 s on those '
-                          'passes and cannot fire on a healthy one. Use this to reproduce the '
-                          'unrecovered baseline.')
+                     help='turn off the 0xF2 silent-send recovery. About one exchange in three '
+                          'negotiates fully and then never opens a connection, so nothing moves '
+                          'in either direction. The recovery costs a rescan of about 20 to 30 s '
+                          'on those passes and cannot fire on a healthy one. Use this to '
+                          'reproduce the unrecovered baseline.')
     run.add_argument('--pcap', action='store_true')
     run.add_argument('--verbose', '-v', type=int, default=1)
     run.add_argument('--settings-file', metavar='PATH',
