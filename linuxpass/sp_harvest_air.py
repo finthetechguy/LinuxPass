@@ -1,16 +1,5 @@
 #!/usr/bin/env python3
-"""Recover CEC messages a console sent us, out of an sp_link run log.
-
-Capturing real messages off the air is the other half of a relay: it is how a Linux box acquires
-content for titles it has no dump for. `sp_cecstore.py` reads messages out of a console's own save
-image; this reads them out of an encounter.
-
-The log records the decrypted plaintext of every frame the console sent, so the messages are all
-there -- but a naive "concatenate the payloads in order" reassembly desynchronises the moment a
-frame is repeated, which is exactly what happens on a long transfer. Place each payload at its own
-YY `seq` instead, the way the receiver does (cecd 0x106E80 indexes by bytes-received), and start a
-new object on the peer's SYN.
-"""
+"""Recover CEC messages a console sent us, out of an sp_link run log."""
 import re, struct, sys, os, hmac, hashlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -31,7 +20,7 @@ def objects_from_log(path):
         if not y or not y.get('ok'):
             continue
         f = y['flags']
-        if f & sp_yy.SYN and not (f & sp_yy.ACK):     # peer opens a connection
+        if f & sp_yy.SYN and not (f & sp_yy.ACK):
             buf, high = bytearray(), 0
             continue
         pl = y.get('payload') or b''
@@ -40,7 +29,7 @@ def objects_from_log(path):
         seq = y['seq']
         if seq + len(pl) > len(buf):
             buf.extend(b'\x00' * (seq + len(pl) - len(buf)))
-        buf[seq:seq + len(pl)] = pl                   # a repeat overwrites itself, harmlessly
+        buf[seq:seq + len(pl)] = pl
         high = max(high, seq + len(pl))
         if f & sp_yy.URG:                             # END: a whole object, or a window flush
             cand = bytes(buf[:high])
@@ -105,7 +94,7 @@ def _selftest():
         if t in by:
             chk('%08X is its declared size' % t, len(by[t]) == want,
                 '%#x vs %#x' % (len(by[t]), want))
-    # the HMAC is the real integrity check: a mis-assembled body cannot pass it
+    # The HMAC catches a mis-assembled body.
     try:
         import sp_savefs, sp_cecstore
         pa = os.path.join(here, 'partitionA.bin')

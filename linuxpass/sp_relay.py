@@ -1,78 +1,25 @@
 #!/usr/bin/env python3
-"""LinuxPass: a daemon that exchanges with any 3DS that passes.
-
-It parks on the discovery channels, engages consoles one at a time, serves each one from ITS OWN
-outbox, and files everything it receives.
-
-Design notes that matter:
-
-* **It is a console, not a courier.** The relay exchanges only the CEC data its operator gave it.
-  Messages other consoles hand over are filed -- so they can be read, verified and inspected --
-  but they are never served on to anybody. A CEC message carries its original author's identity
-  in its body (their Mii, their name, their letter, their console), so passing one along would
-  hand a stranger's personal data to other strangers who never met them. There is no flag for
-  this; the store records where every message came from and anything marked `air:` is refused at
-  the point of selection.
-* **One peer at a time.** The CCMP key is derived from both MACs and both session tokens, so a
-  link is a pair. Several consoles in sleep mode will all answer our probes, so the loop is a peer
-  QUEUE with a per-peer cooldown rather than "find a peer and stop".
-* **Fixed identity by default.** cecd writes the peer's MAC into `data:/CEC/MacFilter___` when an
-  exchange completes and never speaks to that MAC again. Measured 5-7 Sep 2026: the block is not
-  time-based -- it survived 24.4 h, a reboot, a power-off, the console's own MAC rotation and a
-  THREE-DAY jump of the console's clock, and nothing is pruned from the file in 47 h. Only the
-  operator's manual "clear StreetPass data" resets it. So a fixed identity gets exactly ONE
-  exchange per console, ever, and that is correct StreetPass behaviour rather than a bug.
-  Two ways round it, both opt-in, both changing the identity only BETWEEN passes so a rotation can
-  never land mid-exchange: `--rotate-identity` presents a new MAC every pass (no real hardware can
-  do this -- it is a soak-test tool), and `--rotate-every SECONDS` presents a new one on a timer,
-  which is what a fleet of real consoles looks like. The status output says which is on.
-* **Everything goes through the store.** `sp_store.Store` is the single source of what we can
-  serve and where received messages land, and it is written in the console's own shape so
-  `sp_cecstore` can read it and so it stays inspectable.
-* **The control socket is the only interface.** `pause`, `resume`, `status` and `stop` all arrive
-  there, which keeps a future GUI a thin client over the same protocol as the CLI.
-* **Nothing here may reboot the machine.** A wedged pass is recovered by restarting the SERVICE
-  and rebuilding the monitor interface; see `linuxpass.service` and `--pass-timeout`.
-"""
+"""LinuxPass: a daemon that exchanges with any 3DS that passes."""
 import os, sys, json, time, socket, stat, struct, threading, random, argparse, re, pwd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sp_store, sp_cecstore, sp_cec, sp_harvest_air, sp_build
 
-#: Twelve hours before we engage the same console again. The value is unchanged but its
-#: JUSTIFICATION IS NOT: this used to cite "cecd's MacFilter re-StreetPass limit, ~11-12 h",
-#: which was measured false on 5 Sep 2026 -- a console asleep with a cleared filter engaged
-#: this relay's one fixed MAC 334 times in 3 h and completed NINE full exchanges in 5 min 19 s.
-#: The real reason to wait is politeness and usefulness: its inbox holds only ~8-9 messages
-#: per title, so exchanging every 25 s just fills it with nine copies of our four messages
-#: and it then refuses everything for hours. See PROJECT_STATE.md and plaza-hmac-key notes.
+# A console's inbox holds about 9 messages per title, so frequent exchanges only fill it.
 DEFAULT_COOLDOWN = 12 * 3600.0
 CONTROL_SOCKET = 'relay.sock'
 STATE_FILE = 'relay_state.json'
-#: Timed rotation's own state, kept out of relay_state.json so the peer book stays the peer book.
-#: Holds the identity currently in use and when it was adopted, so a service restart resumes the
-#: schedule instead of snapping back to the fixed MAC -- which every console we have met has
-#: already blocked, and which would silently undo the whole point of rotating.
+# Kept apart from the peer book so a restart resumes the schedule, not the blocked fixed MAC.
 ROTATION_FILE = 'rotation.json'
-#: A rotation faster than one pass buys nothing -- the identity only ever changes between passes --
-#: and each change takes the vif down and up, so a very small value is churn, not stealth.
+# The identity only changes between passes, and each change takes the interface down.
 MIN_ROTATE_SECONDS = 60
 MAC_RE = re.compile(r'^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$')
-#: `sun_path` is 108 bytes on Linux, NUL included. Stay well clear of it.
+# `sun_path` is 108 bytes on Linux, NUL included.
 SOCK_PATH_MAX = 100
 
 
 def control_socket_path(store):
-    """-> where this store's control socket lives.
-
-    Normally `<store>/relay.sock`. A store nested deep enough that the path exceeds `sun_path`
-    gets a short one derived from the same path instead, so the daemon still HAS an interface.
-    Both ends compute this the same way from the store path, so no pointer file is needed.
-
-    This is not hypothetical tidiness: with a long store path `bind()` raised inside the control
-    thread, the traceback went to the log, and the daemon carried on serving consoles with no
-    control socket at all -- pausing, status and the whole GUI silently unavailable.
-    """
+    """-> where this store's control socket lives."""
     p = os.path.join(os.path.abspath(store), CONTROL_SOCKET)
     if len(p.encode()) <= SOCK_PATH_MAX:
         return p
@@ -156,13 +103,7 @@ def peer_can_read(path, uid):
 
 
 def sd_notify(state):
-    """Tell systemd how we are doing, if systemd started us. -> True if the message went out.
-
-    This is the whole of the watchdog contract and it needs no library: `NOTIFY_SOCKET` names a
-    datagram socket (a leading '@' means the abstract namespace), and `WATCHDOG=1` on it resets
-    the unit's `WatchdogSec` timer. When the heartbeat stops, systemd restarts THIS SERVICE --
-    which is the entire point of the change away from a reboot deadman.
-    """
+    """Tell systemd how we are doing, if systemd started us."""
     addr = os.environ.get('NOTIFY_SOCKET')
     if not addr:
         return False
@@ -178,60 +119,24 @@ def sd_notify(state):
         return False
 
 
-# ---------------------------------------------------------------------------------------------
-# who we have met
-
-
 def declared_length(msg):
     """The total length a CEC message states in its own header at +0x04, or -1 if unreadable."""
     return struct.unpack_from('<I', msg, 4)[0] if len(msg) >= 8 else -1
 
 
 def message_is_whole(msg):
-    """Does a CEC message contain exactly as many bytes as its header claims?
-
-    The cheapest possible integrity check and the last line of defence before the store. A
-    truncated message is indistinguishable from a good one once it is filed -- same title, same
-    id, same everything -- so it has to be caught here or not at all.
-    """
+    """Does a CEC message contain exactly as many bytes as its header claims?"""
     return declared_length(msg) == len(msg)
 
 
 class PeerBook:
-    """Per-peer history: when we last exchanged, and what we have already given them.
-
-    Persisted as JSON next to the store so a restart does not re-flood a console it just met.
-
-    **A 3DS rotates its MAC, so this is a hint, not a guarantee.** [M] Measured across this
-    project's own run logs: 18 distinct source MACs from two physical consoles, and three
-    different MACs from one console inside eleven minutes (1 Sep 2026, 22:41 / 22:45 / 22:52).
-    Only the top three bytes look stable. So a console that comes back under a new MAC reads as a
-    new peer and its cooldown restarts.
-
-    This used to be called survivable on the grounds that the limit which actually matters is
-    enforced at the other end -- cecd's MacFilter rate-limiting by the MAC of the console it met,
-    which is OURS and is fixed. **That is false, measured 5 Sep 2026.** The console does NOT stop
-    us flooding it: with its filter cleared and asleep, an XL engaged this relay's single fixed MAC
-    334 times in 2.98 h and completed nine full exchanges inside 5 min 19 s, re-engaging 12-55 s
-    after each. The only thing that stopped it accepting was its inbox filling at ~8-9 messages per
-    title, after which it kept engaging just as eagerly and refused every title.
-
-    So the peer book is not a convenience backed up by the console -- it is the ONLY thing on
-    either side that limits how often we exchange with one console, and a MAC rotation genuinely
-    defeats it. `Relay.exchange_gap` is the backstop that does not depend on any MAC, and it is the
-    one to reach for when the peer book is not enough.
-    """
+    """Per-peer history: when we last exchanged, and what we have already given them."""
 
     def __init__(self, path, cooldown=DEFAULT_COOLDOWN, retry=60.0):
         self.path = path
         self.cooldown = cooldown
-        #: after a FAILED attempt, wait this long before trying the same console again -- long
-        #: enough not to spin on it while another console waits, short enough that a transient
-        #: failure does not cost a full cooldown.
         self.retry = retry
         self.peers = {}
-        #: consoles we will never exchange with, {mac: {'when', 'note'}}. Distinct from a
-        #: cooldown, which is a delay; this is a refusal.
         self.blocked = {}
         if os.path.exists(path):
             try:
@@ -247,7 +152,6 @@ class PeerBook:
             json.dump({'peers': self.peers, 'blocked': self.blocked}, f, indent=1, sort_keys=True)
         os.replace(tmp, self.path)
 
-    # -- the denylist ----------------------------------------------------------------------
     def is_blocked(self, mac):
         return mac.lower() in self.blocked
 
@@ -263,46 +167,29 @@ class PeerBook:
         return gone
 
     def set_wait(self, mac, seconds, now=None):
-        """Make this peer due in exactly `seconds`. -> True if the peer was known.
-
-        Zero or less makes it due immediately WITHOUT discarding what we have sent it, which
-        `forget` would. Editing the remaining time is the GUI's job on the Denylist tab; the
-        arithmetic lives here so both callers agree on what "remaining" means.
-        """
+        """Make this peer due in exactly `seconds`."""
         now = time.time() if now is None else now
         e = self.peers.get(mac.lower())
         if e is None:
             return False
         e['last'] = now - max(0.0, self.cooldown - max(0.0, float(seconds)))
-        # The operator has stated the remaining time, so it must be the whole answer: leaving the
-        # retry backoff in place would make `wait` report a number nobody asked for, and the peer
-        # would stay refused past the moment the GUI says it is due.
         e['last_attempt'] = 0
         self.save()
         return True
 
     def due(self, mac, now=None):
-        """-> True if this peer may be engaged now.
-
-        A COMPLETED exchange starts the full cooldown. A failed attempt only starts the short
-        retry backoff: charging a failure the full 12 hours means one bad handshake takes that
-        console out of service for the rest of the day, which is exactly what happened on the
-        relay's first run.
-        """
+        """-> True if this peer may be engaged now."""
         now = time.time() if now is None else now
         e = self.peers.get(mac.lower())
         if not e:
             return True
         if (now - e.get('last', 0)) < self.cooldown:
             return False
-        # A peer that has never failed a handshake is not in the retry backoff at all. Defaulting
-        # the timestamp to 0 only looked right because a real `now` is a Unix time and dwarfs the
-        # backoff; on any other time base it refused a peer that had never done anything wrong.
         la = e.get('last_attempt') or 0
         return la <= 0 or (now - la) >= self.retry
 
     def note_attempt(self, mac, now=None):
-        """Record an engagement that did NOT complete, so we back off briefly, not for hours."""
+        """Record an engagement that did not complete, so we back off briefly, not for hours."""
         now = time.time() if now is None else now
         e = self.peers.setdefault(mac.lower(), {'first': now, 'exchanges': 0,
                                                 'sent': [], 'received': []})
@@ -311,12 +198,7 @@ class PeerBook:
         self.save()
 
     def wait(self, mac, now=None):
-        """-> seconds until this peer is due, 0 if it is due now.
-
-        Both of `due`'s gates, not just the cooldown. Reporting only the cooldown made the refusal
-        message say "0 s to go" while still refusing -- which is how the retry-backoff livelock
-        below stayed invisible for a whole run.
-        """
+        """-> seconds until this peer is due, 0 if it is due now."""
         now = time.time() if now is None else now
         e = self.peers.get(mac.lower())
         if not e:
@@ -337,12 +219,7 @@ class PeerBook:
         self.save()
 
     def forget(self, mac=None):
-        """Drop one peer's history, or all of it. -> how many peers were forgotten.
-
-        The cooldown exists to stop us wasting passes on a console we just finished with. When you
-        have deliberately cleared a console's OWN MacFilter to test again, ours is the only thing
-        left in the way, and waiting twelve hours to re-test is not a safety property.
-        """
+        """Drop one peer's history, or all of it."""
         if mac is None:
             n = len(self.peers)
             self.peers = {}
@@ -360,32 +237,8 @@ class PeerBook:
         return h in set(self.peers.get(mac.lower(), {}).get('received', []))
 
 
-# ---------------------------------------------------------------------------------------------
-# what to serve
-
 def select_for_peer(store, peer_titles, book=None, mac=None, max_titles=None, log=None):
-    """-> [container] to serve this peer, newest first. OUR OWN DATA ONLY.
-
-    Policy:
-      * only titles the peer actually declares -- anything else is refused by its offer gate
-        anyway, and a title it has not enabled would break the count check;
-      * only messages from OUR OUTBOX, i.e. the CEC data the operator gave this relay;
-      * never anything a console handed us over the air, whichever box it ended up in;
-      * never hand a console content it gave us, and never repeat what we already sent it;
-      * Mii Plaza (send mode 0) needs the peer to have a message of its own for that title, but
-        that is decided during the exchange, not here.
-
-    The relay is one entity with its own CEC data, the way a console is. It is NOT a courier, and
-    there is no flag to make it one. A CEC message carries its author's identity in its body --
-    their Mii, their name, their letter, the console that wrote it -- and the receiving console
-    attributes it to them, not to us. Passing one along would hand a stranger's personal data to
-    other strangers who never met them, on the strength of having walked past this box once.
-
-    Two independent gates enforce that, because one of them is a filename convention:
-      1. only `box='outbox'` is ever read;
-      2. anything whose recorded provenance starts with `air:` is dropped even if it somehow sits
-         in the outbox -- a mis-aimed import, a hand-copied file, a future bug.
-    """
+    """-> [container] to serve this peer, newest first."""
     want = {t for t in peer_titles}
     out, seen_titles, seen_ids = [], set(), set()
     for tid, box, c in sorted(store.messages(box='outbox'),
@@ -413,11 +266,7 @@ def select_for_peer(store, peer_titles, book=None, mac=None, max_titles=None, lo
 
 
 def title_metadata_any(path):
-    """-> {title: {'name', 'hmac_key'}} from a save image OR a directory tree.
-
-    `sp_cecstore.title_metadata` only understands a SAVE image. An emulator NAND or a mounted
-    dump is a plain directory, so walk it for the same two files.
-    """
+    """-> {title: {'name', 'hmac_key'}} from a save image OR a directory tree."""
     if not os.path.isdir(path):
         import sp_savefs
         try:
@@ -451,18 +300,7 @@ def title_metadata_any(path):
 
 
 def import_into(store, path, log=print, replace=False):
-    """Ingest CEC data from a save image, a mounted directory, or an emulator NAND. -> count.
-
-    `sp_cecstore.scan_any` already handles all three shapes, including Azahar/Citra's
-    `nand/data/<id0>/sysdata/00010026/00000000/CEC/`, so this is the loader on top: it also pulls
-    across each title's display name and HMAC key when the source has them, and records the source
-    path as each message's provenance.
-
-    `replace` empties the OUTBOX first, which is how you swap the data this relay is holding.
-    Without it an import adds to what was already there and the relay keeps serving both sets --
-    so pointing it at a second console's dump would have it offering the first console's messages
-    back to the console they came from.
-    """
+    """Ingest CEC data from a save image, a mounted directory, or an emulator NAND."""
     found = sp_cecstore.scan_any(path)
     meta = title_metadata_any(path)
     if replace:
@@ -473,10 +311,6 @@ def import_into(store, path, log=print, replace=False):
         if not c:
             continue
         t = m['cec_title_id']
-        # Refresh the name and key even for a title we already hold. `add_message` only registers
-        # a title it has never seen, so without this an import can never CORRECT metadata -- which
-        # is exactly what was needed after a title's name had been stored with a decoding artefact
-        # in it. Neither argument clears anything when it is None, so this is safe to repeat.
         md = meta.get(t) or {}
         if md.get('name') or md.get('hmac_key'):
             store.add_title(t, name=md.get('name'), hmac_key=md.get('hmac_key'))
@@ -489,13 +323,7 @@ def import_into(store, path, log=print, replace=False):
 
 
 def backfill_air_provenance(store, book, log=print):
-    """Stamp messages the peer book knows a console gave us, but the store has no origin for.
-
-    A store written before provenance existed has none, and `status` would then report a
-    reassuring zero for "held but never served" while sitting on other people's messages. The peer
-    book already recorded, per console, exactly which message ids came from it -- so the fact is
-    recoverable rather than assumed. Idempotent; runs at startup.
-    """
+    """Stamp messages the peer book knows a console gave us, but the store has no origin for."""
     known = {}
     for t, b, c in store.messages():
         known.setdefault(c[0x20:0x28].hex(), []).append((t, b))
@@ -516,11 +344,7 @@ def backfill_air_provenance(store, book, log=print):
 
 
 def import_from_log(store, log_path, log=print):
-    """Ingest the messages a console sent us during a run. -> count.
-
-    These land in the INBOX marked `air:`, which means they are readable, verifiable and
-    inspectable but will never be served to anybody. See `select_for_peer`.
-    """
+    """Ingest the messages a console sent us during a run."""
     n = 0
     for _t, c in sp_harvest_air.messages_from_log(log_path):
         store.add_message(c, 'inbox', origin='air:log:' + os.path.basename(log_path))
@@ -529,16 +353,12 @@ def import_from_log(store, log_path, log=print):
     return n
 
 
-# ---------------------------------------------------------------------------------------------
-# control socket -- the only interface, so a GUI is a thin client over the same protocol
-
 class Control:
     """A line protocol over a unix socket: one JSON request per line, one JSON reply."""
 
     def __init__(self, path, relay, owner=None):
         self.path = path
         self.relay = relay
-        #: Name of the one non-root user allowed to connect, or None for root only.
         self.owner = owner
         self.sock = None
         self.thread = None
@@ -562,7 +382,6 @@ class Control:
         if cmd == 'stop':
             r.running = False
             return {'ok': True, 'stopping': True}
-        # ---- read-only views the GUI polls -------------------------------------------
         if cmd == 'store':
             return {'ok': True, 'store': r.describe_store()}
         if cmd == 'encounters':
@@ -579,7 +398,6 @@ class Control:
         if cmd == 'log':
             return {'ok': True, 'log': r.recent_log(int(req.get('limit', 300)))}
 
-        # ---- the denylist ------------------------------------------------------------
         if cmd == 'block':
             if not req.get('mac'):
                 return {'ok': False, 'error': 'block needs a mac'}
@@ -599,10 +417,6 @@ class Control:
                     'remaining_s': round(r.book.wait(req['mac']), 1)}
 
         if cmd == 'rotate':
-            # Live, because this daemon is meant to run for days and a restart to change one
-            # number is a poor interface. The GUI ALSO writes SP_ROTATE to relay.env so the
-            # setting survives a restart; the two carry the same value, so there is no precedence
-            # question to get wrong.
             if 'seconds' in req:
                 try:
                     n = int(float(req['seconds']))
@@ -612,10 +426,7 @@ class Control:
                     return {'ok': False, 'error': 'seconds must not be negative'}
                 r.a.rotate_every = n
                 if n and not r.a.rotate_identity and not os.path.exists(r.rotation_path()):
-                    # Turning rotation on means taking a fresh identity -- the fixed MAC is
-                    # exactly the one consoles have already blocked. But ONLY at the next pass
-                    # boundary: changing it means taking the vif down, and a pass may be holding
-                    # a link right this second. Ageing the identity out asks one_pass() to do it.
+                    # Only at a pass boundary, because changing identity takes the interface down.
                     r.identity_since = 0.0
                 elif not n:
                     try:
@@ -635,7 +446,6 @@ class Control:
                                         else max(0.0, round(r.identity_since
                                                             + r.rotate_seconds() - time.time(), 1)))}
 
-        # ---- store mutations, all under the lock so a pass cannot read a half-change ---
         if cmd == 'set_adapter':
             name = req.get('name')
             if not isinstance(name, str) or not ADAPTER_RE.fullmatch(name):
@@ -702,9 +512,6 @@ class Control:
             self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             self.sock.bind(self.path)
         except OSError as e:
-            # Loudly, on the relay's own log. A control socket that failed to bind used to show up
-            # only as a thread traceback, leaving a daemon that looked healthy and could not be
-            # talked to.
             self.failed = '%s: %s' % (type(e).__name__, e)
             self.relay.log('  CONTROL SOCKET UNAVAILABLE at %s -- %s' % (self.path, self.failed))
             self.relay.log('  the daemon will keep exchanging, but nothing can pause or query it')
@@ -754,26 +561,7 @@ class Control:
 
 
 def recovery_argv(a):
-    """The --manifest-repeat/--repeat-type pair to hand sp_link, honouring --no-silent-recovery.
-
-    The silent-send recovery: in roughly a third of exchanges the console completes the whole
-    negotiation and then never opens a connection of its own, which delivers nothing in EITHER
-    direction (a silent pass produces no console FIN, and the FIN is what says it counted our
-    declared messages in). cecd's object handler 0x1073F0 tests for object type 0xF2 at 0x107424
-    *before* it reads the exchange state at 0x10742A, so a synthesised 0xF2 is the one stimulus a
-    parked console cannot route away; it answers by rescanning, which drops the link and makes the
-    console re-engage from the top. Repeating our own 0x81 or 0x33 instead does nothing, because
-    cecd routes those BY state -- both were built and measured. Evidence in SILENT_SEND.md.
-
-    It cannot fire on a healthy pass: `_maybe_repeat_manifest` is reachable only from the idle
-    path in YYSession.poll, i.e. after the console has already failed to open a connection within
-    400 ms, and the console's response time is bimodal -- 6 ms or never.
-
-    ALWAYS returns both flags, never nothing. sp_link defaults the recovery on too, so staying
-    silent here would let sp_link's default override a relay that was asked for
-    --no-silent-recovery, quietly turning a control block into a treatment block. Same class of
-    mistake as the two relays that once ran concurrently: make the caller authoritative.
-    """
+    """The --manifest-repeat/--repeat-type pair to hand sp_link, honouring --no-silent-recovery."""
     rep = int(getattr(a, 'manifest_repeat', 0) or 0)
     if not getattr(a, 'silent_recovery', True):
         rep = 0
@@ -782,11 +570,7 @@ def recovery_argv(a):
 
 
 def send_command(sock_path, cmd, **kw):
-    """-> the daemon's reply dict. Used by the CLI and, later, by the GUI.
-
-    The socket argument is `sock_path`, not `path`: a command's own payload may carry a `path`
-    (`import`), and a collision there is a TypeError at the worst possible moment.
-    """
+    """-> the daemon's reply dict."""
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.settimeout(5.0)
     s.connect(sock_path)
@@ -801,8 +585,6 @@ def send_command(sock_path, cmd, **kw):
     return json.loads(buf.decode('utf-8', 'replace') or '{}')
 
 
-# ---------------------------------------------------------------------------------------------
-
 class Relay:
     def __init__(self, args):
         self.a = args
@@ -816,37 +598,25 @@ class Relay:
         self.last_peer = None
         self.last_error = None
         self.identity = args.mac or self.fixed_identity()
-        #: When the identity now in use was adopted. Only meaningful for timed rotation.
         self.identity_since = time.time()
         self.rotations = 0
         self.exchange_gap = getattr(args, 'exchange_gap', 0.0)
-        #: consecutive passes where the monitor interface itself was unusable. The recovery for
-        #: that is to REBUILD the interface, which happens in the service's ExecStartPre -- so we
-        #: exit non-zero and let systemd restart us. Never a reboot.
+        # The fix is rebuilding the interface, so exit and let systemd restart us.
         self.iface_failures = 0
-        #: The control socket runs on its own thread, and once a GUI can add titles or delete
-        #: messages it will do so WHILE a pass is reading the store to decide what to serve.
-        #: Every store mutation and every store read that feeds an exchange takes this.
+        # The control thread can change the store while a pass reads it.
         self.lock = threading.RLock()
         self.last_success = 0.0
         self.passes = 0
         self.last_tick = time.time()
         self._pending_sent = []
         self._pending_map = {}
-        #: set when the vif's address and the address we transmit from disagree and could not
-        #: be reconciled -- see align_iface_identity(). Surfaced in status() so the GUI sees it.
         self.iface_mismatch = None
 
     def log(self, msg):
         print('[%s] %s' % (time.strftime('%H:%M:%S'), msg), flush=True)
 
     def fixed_identity(self):
-        """A stable MAC derived from the store path, so a restart keeps the same identity.
-
-        The seed string is `sp_identity.SEED_PREFIX` and is deliberately NOT renamed with the
-        project -- see the note there. Changing it would rotate the identity of every existing
-        installation.
-        """
+        """A stable MAC derived from the store path, so a restart keeps the same identity."""
         import hashlib
         h = hashlib.sha256((sp_identity_seed() + os.path.abspath(self.a.store)).encode()).digest()
         return 'ba:ae:6e:%02x:%02x:%02x' % (h[0], h[1], h[2])
@@ -856,13 +626,7 @@ class Relay:
         return 'ba:ae:6e:%02x:%02x:%02x' % tuple(random.getrandbits(8) for _ in range(3))
 
     def rotate_seconds(self):
-        """The configured rotation period in seconds, or 0 for never.
-
-        Parsed leniently ON PURPOSE. The value reaches us through `SP_ROTATE` in an
-        EnvironmentFile a GUI writes, the unit is `Restart=always` with `StartLimitIntervalSec=0`,
-        and argparse's `type=int` on a typo would therefore be an unbounded crash loop -- a far
-        worse failure than ignoring one bad setting. Same reasoning as align_iface_identity().
-        """
+        """The configured rotation period in seconds, or 0 for never."""
         raw = getattr(self.a, 'rotate_every', 0)
         if raw in (None, '', 0, '0'):
             return 0
@@ -928,18 +692,10 @@ class Relay:
             since = float(since)
         except (TypeError, ValueError):
             return None
-        # A `since` in the future is a clock that moved backwards. Treat it as "now" rather than
-        # letting it park the identity for however long the jump was.
         return {'mac': mac, 'since': min(since, time.time())}
 
     def begin_rotation(self):
-        """Set up the identity for a timed-rotation run. Called once, before the first pass.
-
-        Resume a persisted identity if there is one -- a restart must not snap back to the fixed
-        MAC, which every console this relay has met has already blocked. With nothing persisted,
-        rotate immediately: the fixed identity is precisely the one known to be refused, so
-        starting on it would waste the first period.
-        """
+        """Set up the identity for a timed-rotation run."""
         st = self.load_rotation()
         if st:
             self.identity, self.identity_since = st['mac'], st['since']
@@ -954,13 +710,7 @@ class Relay:
             self.save_rotation()
 
     def set_iface_mac(self, mac):
-        """Point the monitor vif at `mac`. Only used when rotating.
-
-        The hardware only ACKs frames addressed to the INTERFACE's MAC, so a rotated identity is
-        useless unless the interface follows it. Done strictly between passes, when no socket is
-        open: the vif has to go down to change its address, and every command is under `timeout`
-        because a wedged `ip`/`iw` on this box has historically taken the whole machine with it.
-        """
+        """Point the monitor vif at `mac`."""
         import subprocess
         for args in (['ip', 'link', 'set', self.a.iface, 'down'],
                      ['ip', 'link', 'set', self.a.iface, 'address', mac],
@@ -983,14 +733,7 @@ class Relay:
             self.save_rotation()
 
     def apply_rotation(self):
-        """Take the identity that is due now, moving the vif with it. -> the MAC to transmit from.
-
-        Called from one_pass() and nowhere else, so the address is settled before any socket is
-        open and a rotation can never land inside an exchange. If the vif refuses to move we keep
-        the OLD identity rather than transmitting from an address the card will not ACK -- that
-        failure looks exactly like a console ignoring us, which is usually the hypothesis under
-        test.
-        """
+        """Take the identity that is due now, moving the vif with it."""
         mac = self.next_identity()
         if mac != self.identity:
             if self.set_iface_mac(mac):
@@ -1008,26 +751,7 @@ class Relay:
             return None
 
     def align_iface_identity(self):
-        """Point the interface at the address we transmit from, or say so loudly.
-
-        The hardware ACKs only frames addressed to the INTERFACE. If the vif's address and the
-        one we put in our frames disagree, the console's directed frames go unacknowledged and it
-        gives up -- so the relay transmits perfectly and is never answered, which is
-        indistinguishable from a console that is deliberately ignoring us. That is usually the
-        very hypothesis such a run is trying to test, which is what makes this failure expensive.
-
-        `--mac` caused exactly that until 5 Sep 2026: it changed the address in our frames and
-        left the vif alone, because `sp_monitor.sh` sets the vif from SP_MAC or the store-derived
-        identity and knows nothing about the flag.
-
-        We realign rather than refuse to start. The unit is `Restart=always` with
-        `StartLimitIntervalSec=0`, so exiting here would be an unbounded crash loop -- a worse
-        failure than the one being guarded.
-
-        `--rotate-identity` is exempt because it drives the vif itself on every pass. TIMED
-        rotation is NOT exempt: between rotations the identity is held for hours, and for all of
-        that time the vif has to match it or the console's directed frames go unacknowledged.
-        """
+        """Point the interface at the address we transmit from, or say so loudly."""
         self.iface_mismatch = None
         if self.a.rotate_identity:
             return True
@@ -1068,7 +792,6 @@ class Relay:
             'rotate_identity': bool(self.a.rotate_identity),
             'rotate_every_s': self.rotate_seconds(),
             'identity_age_s': round(time.time() - self.identity_since, 1),
-            #: seconds until the identity changes, or None when rotation is off / per-pass
             'next_rotation_s': (None if (self.a.rotate_identity or not self.rotate_seconds())
                                 else max(0.0, round(self.identity_since + self.rotate_seconds()
                                                     - time.time(), 1))),
@@ -1080,13 +803,7 @@ class Relay:
             'store': self.a.store,
             'titles': ['%08X' % t for t in self.store.titles()],
             'messages': len(self.store.messages()),
-            # What we can actually GIVE a console, as opposed to what we merely hold. The
-            # difference is everything a console handed us: filed, readable, never served.
-            #
-            # Counted by DIFFERENCE, not by reading the provenance tags. Anything filed before the
-            # store kept provenance has no tag, and counting tags would report a reassuring zero
-            # for a store full of other people's messages. The set difference cannot lie: it is
-            # exactly what we hold and would not hand over.
+            # Counted by set difference, because older stored messages have no provenance tag.
             'servable': len(self.servable()),
             'held_but_never_served': len({c[0x20:0x28] for _t, _b, c in self.store.messages()}
                                          - {c[0x20:0x28] for c in self.servable()}),
@@ -1096,11 +813,7 @@ class Relay:
         }
 
     def describe_store(self):
-        """Everything the GUI needs to draw the Outbox and Inbox tabs, in one round trip.
-
-        Deliberately one call: a tab that made a request per title would race the exchange loop
-        and show a store that never existed at any single instant.
-        """
+        """Everything the GUI needs to draw the Outbox and Inbox tabs, in one round trip."""
         with self.lock:
             serv = {c[0x20:0x28] for c in self.servable()}
             out = {'titles': [], 'max_titles': sp_store.MBOXLIST_MAX}
@@ -1126,11 +839,7 @@ class Relay:
             return out
 
     def recent_log(self, limit=300):
-        """-> the daemon's own recent output, newest last.
-
-        Read from the journal when systemd started us (the unit logs there), else from the
-        per-pass logs. The GUI should not have to know which.
-        """
+        """-> the daemon's own recent output, newest last."""
         import subprocess
         try:
             r = subprocess.run(['journalctl', '-u', 'linuxpass', '-n', str(limit),
@@ -1152,7 +861,6 @@ class Relay:
         with self.lock:                      # RLock: describe_store() already holds it
             return select_for_peer(self.store, self.store.titles())
 
-    # -- the exchange ----------------------------------------------------------------------
     @staticmethod
     def peer_titles(peer_services):
         """The CEC title ids a console declared. sp_parse gives dicts of hex strings."""
@@ -1168,11 +876,7 @@ class Relay:
         return os.path.join(self.a.store, 'encounters.jsonl')
 
     def note_encounter(self, rec, keep=500):
-        """Append one line of history, so the GUI can show what happened and when.
-
-        The peer book records the CURRENT state of each console; this records EVENTS. A GUI with
-        only the peer book could say "3 exchanges" but never "at 23:10 it took your letter".
-        """
+        """Append one line of history, so the GUI can show what happened and when."""
         rec = dict(rec)
         rec.setdefault('when', time.time())
         try:
@@ -1200,34 +904,18 @@ class Relay:
         return out
 
     def _decline(self, link, reason, msg):
-        """Serve this peer nothing, and make sure the reason reaches BOTH logs.
-
-        `self.log` is the daemon's own logger -- the journal, under systemd. The per-run log is
-        written by `sp_link`, and until 5 Sep 2026 the decline reasons went only to the former.
-        A pass that engaged and then deliberately offered nothing therefore read, in the run log
-        alone, as: engaged, opened the YY exchange, `SYNSENT -> DONE` on the first SYN|ACK, ended.
-        That is indistinguishable from a console fault, and it was diagnosed as one twice before
-        this was fixed. The run log now says why it ended.
-
-        Returns None so the callers can `return self._decline(...)` directly.
-        """
+        """Serve this peer nothing, and make sure the reason reaches both logs."""
         self.log(msg)
         self._declined = reason
         if link is not None:
             link.declined = reason
-            # A link that cannot log is only ever a test double; failing here would be caught by
-            # sp_link's hook guard and silently downgrade us to serving the default outbox.
             lg = getattr(link, 'log', None)
             if callable(lg):
                 lg('      %s' % msg.strip())
         return None
 
     def peer_hook(self, link, mac, peer_services):
-        """Called the instant a console engages: choose what to serve THIS console.
-
-        Returns the complete object list, prefix included, because `--full-sequence` runs at
-        construction time when the outbox is still empty.
-        """
+        """Called the instant a console engages: choose what to serve this console."""
         import sp_link
         if self.book.is_blocked(mac):
             r = self._decline(link, 'blocked',
@@ -1262,13 +950,7 @@ class Relay:
         objects = prefix + sp_build.build_outbox(picked)
         ids = [c[sp_build.ENVELOPE_LEN + 0x20:sp_build.ENVELOPE_LEN + 0x28] for c in picked]
         self._pending_sent = list(ids)
-        # Which OBJECT carries which message(s). `build_outbox` groups by title -- a title with
-        # two queued messages travels as ONE envelope holding both -- and appends those envelopes
-        # last. So the object count and the message count differ whenever any title has more than
-        # one message, and subtracting one from the other to decide what was delivered gives the
-        # wrong answer on a partial transfer: a message can be recorded as given to a console that
-        # never received it, and it is then never offered again. Map it explicitly instead, by
-        # finding the 0x6161 envelopes in the object list rather than by counting.
+        # One envelope can hold several messages, so map objects to messages explicitly.
         groups, order = {}, []
         for c, mid in zip(picked, ids):
             t = sp_build.message_title(c)
@@ -1278,7 +960,6 @@ class Relay:
             groups[t].append(mid)
         env_idx = [i for i, o in enumerate(objects) if o[:2] == b'\x61\x61']
         self._pending_map = {i: groups[t] for i, t in zip(env_idx, order)}
-        #: msgid -> what it is, so the encounter history can say more than a count
         self._detail = {mid: {'title': '%08X' % sp_build.message_title(c), 'bytes': len(c)}
                         for c, mid in zip(picked, ids)}
         return services, objects
@@ -1289,9 +970,7 @@ class Relay:
         runs = os.path.join(self.a.store, 'runs')
         os.makedirs(runs, exist_ok=True)
         stamp = int(time.time())
-        # The identity changes HERE and nowhere else -- at a pass boundary, before any socket is
-        # open. That is what makes a rotation unable to land mid-exchange: by the time sp_link is
-        # holding a link, the address is already settled for the whole window.
+        # The identity changes only here, before any socket opens, so it cannot land mid-exchange.
         mac = self.apply_rotation()
         argv = ['--iface', self.a.iface, '--channel', self.a.channel,
                 '--mac', mac, '--secs', str(self.a.window),
@@ -1304,15 +983,8 @@ class Relay:
         a = sp_link.build_parser().parse_args(argv)
         self._pending_sent, self._pending_map, self._declined = [], {}, None
         link = sp_link.Link(a)
-        # A liveness signal from INSIDE the sniffing loop. If the radio wedges, this stops, the
-        # systemd watchdog notices and restarts the service -- see sd_notify(). Nothing here
-        # reboots the machine.
         link.tick_hook = self.tick
-        # The BROADCAST probe must advertise every title we hold. A console builds its offer from
-        # the intersection of its enabled titles with what we declare, so advertising less than we
-        # have hides content from it -- and sp_link's default is Mii Plaza alone, which is what
-        # this was silently shipping. The peer hook narrows the set afterwards, once we know what
-        # this particular console actually has.
+        # The broadcast probe must advertise every title held. The peer hook narrows it later.
         known = {t: (f, tr) for t, f, tr in sp_link.T.SERVICES_FULL}
         held = [t for t in self.store.titles()]
         if held:
@@ -1324,8 +996,7 @@ class Relay:
             self.last_error = '%s: %s' % (type(e).__name__, e)
             self.log('  exchange failed: %s' % self.last_error)
             return False
-        # rc 1 just means "no console turned up", which is the normal outcome of a quiet pass.
-        # rc 2 is `open_socket` refusing: the interface is gone, or is no longer a monitor.
+        # rc 1 is a quiet pass. rc 2 means the interface is gone or no longer a monitor.
         if rc == 2:
             self.iface_failures += 1
             self.last_error = '%s is not a usable monitor interface (%d in a row)' \
@@ -1336,10 +1007,7 @@ class Relay:
         peer = sp_link.T.macstr(link.peer) if link.peer else None
         got = []
         sess = getattr(link, 'session', None)
-        # Only count messages the session actually DELIVERED. Recording what we intended to send
-        # marks them as given to that console, and the peer book would then never offer them
-        # again -- a failed exchange would silently consume its own content. `sent_objects` counts
-        # OBJECTS, and the map says which message ids rode in each.
+        # Record only what was delivered, or a failed exchange would use up its messages.
         delivered = (sess.stats.get('sent_objects', 0) if sess else 0)
         self._pending_sent = [mid for i, ids in sorted(self._pending_map.items())
                               if i < delivered for mid in ids]
@@ -1348,21 +1016,13 @@ class Relay:
             if len(obj) > 0x14 + 0x70 and obj[:2] == b'\x61\x61':
                 try:
                     for c in sp_build.unwrap(obj):
-                        # SECOND GATE. A CEC message states its own total at +0x04, so a short
-                        # one is self-evident and must never reach the store: it would sit in the
-                        # inbox looking like any other message and, with forwarding on, be handed
-                        # to the next console. The transport now refuses to complete a short
-                        # object at all (sp_yysession.object_length), so nothing should ever fail
-                        # here -- this catches the case where something does anyway. Measured
-                        # 3 Sep 2026: a 32,712 B Mii Plaza message landed 8,048 B short and was
-                        # filed as `_P5PHTIYk0Bo` with no complaint at all.
+                        # Second check: a short message must never reach the store.
                         if not message_is_whole(c):
                             self.log('  DISCARDING a truncated message from %s: %d B on the wire, '
                                      'its own header declares %d. Not stored.'
                                      % (peer or '?', len(c), declared_length(c)))
                             continue
-                        # Filed in the INBOX and stamped with where it came from, which is what
-                        # keeps it out of everything we ever offer to a console.
+                        # Filed in the inbox with its origin, which keeps it from being offered to a console.
                         with self.lock:
                             self.store.add_message(c, 'inbox', origin='air:%s' % (peer or '?'))
                         got.append(c[0x20:0x28])
@@ -1384,12 +1044,7 @@ class Relay:
             self.log('  exchanged with %s: sent %d, received %d (store now holds %d)'
                      % (peer, len(self._pending_sent), len(got), len(self.store.messages())))
             return True
-        # A peer we DECLINED to serve did not fail: we chose not to give it anything, and
-        # `peer_hook` has already recorded why. Charging that to `note_attempt` re-armed the retry
-        # backoff on every refusal, and because a console re-engages every ~13 s -- well inside the
-        # 60 s backoff -- the peer could never become due again. Measured 3 Sep 2026: after one
-        # exchange, six consecutive engagements over 2 minutes were all refused, each one pushing
-        # the backoff another minute out, every message reading "0 s to go".
+        # A declined peer did not fail, so do not re-arm its retry backoff.
         if self._declined or self.book.is_blocked(peer):
             return False
         self.book.note_attempt(peer)
@@ -1406,8 +1061,7 @@ class Relay:
             sd_notify('WATCHDOG=1')
 
     def prune_runs(self):
-        """Keep the newest `--keep-runs` per-pass logs. A quiet 180 s pass still writes ~50 kB of
-        probe chatter, which is ~1 MB an hour -- an unattended daemon must not fill the disk."""
+        """Keep the newest `--keep-runs` per-pass logs."""
         keep = int(getattr(self.a, 'keep_runs', 50) or 0)
         if keep <= 0:
             return
@@ -1426,14 +1080,9 @@ class Relay:
         sock = control_socket_path(self.a.store)
         ctl = Control(sock, self, owner=getattr(self.a, 'control_user', None))
         ctl.start()
-        # Settle the identity BEFORE announcing it. Otherwise the banner names the store's fixed
-        # MAC and the next line silently replaces it, which is exactly the sort of log that sends
-        # someone hunting the wrong address.
         if self.rotate_seconds() and not self.a.rotate_identity:
             self.begin_rotation()
         elif os.path.exists(self.rotation_path()):
-            # Rotation is off. Drop the saved schedule so switching it back on starts fresh
-            # rather than resuming a MAC that may already have been used and blocked.
             try:
                 os.remove(self.rotation_path())
             except OSError:
@@ -1475,8 +1124,7 @@ class Relay:
                     break
                 gap = self.exchange_gap - (time.time() - self.last_success)
                 if gap > 0:
-                    # Independent of any MAC, so it holds even when a console comes back under a
-                    # new one. This is the only rate limit here that a rotating peer cannot evade.
+                    # Independent of MAC, so a rotating peer cannot evade it.
                     sd_notify('STATUS=holding %.0fs after the last exchange' % gap)
                     time.sleep(min(gap, 1.0))
                     continue
@@ -1498,8 +1146,6 @@ class Relay:
         return rc_exit
 
 
-# ---------------------------------------------------------------------------------------------
-
 def _inspect_args(fn):
     import inspect
     return list(inspect.signature(fn).parameters)
@@ -1513,11 +1159,7 @@ def _timesout(fn):
 
 
 def _scan_code_for_machine_kill(path):
-    """-> the machine-killing words that appear in EXECUTABLE code, ignoring prose.
-
-    Comments and docstrings discuss the reboot deadman at length; what must not exist is code
-    that performs one. Tokenising and dropping COMMENT and STRING tokens is the difference.
-    """
+    """-> the machine-killing words that appear in EXECUTABLE code, ignoring prose."""
     import tokenize, io
     src = open(path, 'rb').read()
     kept = []
@@ -1542,17 +1184,10 @@ def _selftest():
     if _k.selftest_keys():
         print('  (no console keys found -- running on generated throwaway keys)')
     try:
-        # ---- import, from a save image and from a directory tree ----
         st = sp_store.Store(os.path.join(tmp, 'store'))
-        # A console save image is a dump of somebody's console, so it lives in your corpus
-        # rather than in the repo (lp_corpus.py). Without one the store is seeded with
-        # messages built from scratch, so everything downstream of "the store has content"
-        # still runs -- only the checks that are ABOUT reading a real image are skipped.
         src = corpus.path('console_nand')
         if src is None:
             import sp_build
-            # one of our own (servable) and one received off the air (held, never forwarded),
-            # because several checks below are about telling those two apart
             for tid, origin in ((0x00020800, None), (0x00030600, 'air:96:58:cb:00:11:22')):
                 m = sp_build.build(mii_name='Tux', greeting='self-test', cec_title_id=tid)
                 st.add_message(m[sp_build.ENVELOPE_LEN:], 'outbox', name='Self-test title',
@@ -1566,7 +1201,6 @@ def _selftest():
                 st.title_key(0x00030600) == b'ctrd' + b'\x00' * 28)
             chk('and the display names', st.title_name(0x00030600) == 'MARIO KART 7',
                 st.title_name(0x00030600))
-            # a directory tree is what an emulator NAND looks like
             st2 = sp_store.Store(os.path.join(tmp, 'store2'))
             n2 = import_into(st2, os.path.join(tmp, 'store'), log=lambda m: None)
             chk('import reads a DIRECTORY tree too (an Azahar/Citra NAND is one)', n2 == 15, n2)
@@ -1574,9 +1208,7 @@ def _selftest():
                 st2.title_key(0x00030600) == st.title_key(0x00030600)
                 and st2.title_name(0x00030600) == 'MARIO KART 7')
 
-        # ---- peer cooldown ----
         book = PeerBook(os.path.join(tmp, 'peers.json'), cooldown=100.0)
-        # --- the 0xF2 silent-send recovery is ON by default (SILENT_SEND.md) --------------
         NS = argparse.Namespace
         chk('the silent-send recovery is armed by default',
             recovery_argv(NS(manifest_repeat=1, repeat_type='0xf2'))
@@ -1590,7 +1222,7 @@ def _selftest():
         chk('an explicit repeat count and type survive',
             recovery_argv(NS(manifest_repeat=4, repeat_type='0x33'))
             == ['--manifest-repeat', '4', '--repeat-type', '0x33'])
-        import sp_link                      # module-level import is deliberate: see one_pass
+        import sp_link
         chk('sp_link arms the same recovery by default',
             (lambda d: d.manifest_repeat == 1 and d.repeat_type == '0xf2')(
                 sp_link.build_parser().parse_args(['--iface', 'mon0'])))
@@ -1605,7 +1237,6 @@ def _selftest():
         chk('and what came from it', book.came_from('AA:BB:CC:00:00:01', b'\x02' * 8))
         book2 = PeerBook(os.path.join(tmp, 'peers.json'), cooldown=100.0)
         chk('the peer book survives a restart', not book2.due('AA:BB:CC:00:00:01', now=1050.0))
-        # a FAILED attempt must not cost a full cooldown
         b5 = PeerBook(os.path.join(tmp, 'p5.json'), cooldown=100.0, retry=10.0)
         b5.note_attempt('DE:AD:00:00:00:01', now=2000.0)
         b6 = PeerBook(os.path.join(tmp, 'p6.json'), cooldown=100.0)
@@ -1618,7 +1249,6 @@ def _selftest():
         chk('forgetting everything works too',
             b6.forget() == 1 and PeerBook(os.path.join(tmp, 'p6.json')).peers == {})
 
-        # -- the denylist: a refusal, not a delay ---------------------------------------------
         b7 = PeerBook(os.path.join(tmp, 'p7.json'), cooldown=100.0)
         chk('an unknown peer is not blocked', not b7.is_blocked('CA:FE:00:00:00:01'))
         b7.block('CA:FE:00:00:00:01', note='noisy neighbour')
@@ -1641,7 +1271,6 @@ def _selftest():
             PeerBook(os.path.join(tmp, 'p8.json')).blocked == {}
             and 'aa:bb:cc:dd:ee:ff' in PeerBook(os.path.join(tmp, 'p8.json')).peers)
 
-        # -- editing the time remaining -------------------------------------------------------
         b9 = PeerBook(os.path.join(tmp, 'p9.json'), cooldown=1000.0)
         b9.record('AB:CD:00:00:00:01', now=5000.0)
         chk('a fresh exchange leaves the full cooldown',
@@ -1664,11 +1293,6 @@ def _selftest():
         chk('a failed attempt does not count as an exchange',
             b5.peers['de:ad:00:00:00:01'].get('exchanges', 0) == 0)
 
-        # -- the retry backoff must be VISIBLE, and must not livelock --------------------------
-        # Replayed from the journal of 3 Sep 2026 12:10-12:13: one exchange, then six engagements
-        # over two minutes, every one refused, every message reading "0 s to go".
-        # T0 is non-zero because 0 is the "never failed" sentinel for last_attempt; a real
-        # timestamp is a Unix time and can never be 0.
         T0 = 1000.0
         b10 = PeerBook(os.path.join(tmp, 'p10.json'), cooldown=30.0, retry=60.0)
         b10.record('CA:FE:00:00:00:01', now=T0)
@@ -1684,21 +1308,18 @@ def _selftest():
         chk('a peer that never failed is not held by the retry rule at all',
             PeerBook(os.path.join(tmp, 'p10b.json'), cooldown=30.0, retry=60.0)
             .due('CA:FE:00:00:00:09', now=T0))
-        # The engagement times measured from the journal, relative to the exchange at 12:10:23.
-        # The first two fall INSIDE the 30 s cooldown and are the legitimate refusals that seed
-        # the backoff; from there every later refusal re-armed it.
         ENG = (16.0, 31.0, 44.0, 80.0, 87.0, 100.0, 144.0, 157.0)
         b11 = PeerBook(os.path.join(tmp, 'p11.json'), cooldown=30.0, retry=60.0)
         b11.record('CA:FE:00:00:00:02', now=T0)
         for t in ENG:
             if not b11.due('CA:FE:00:00:00:02', now=T0 + t):
-                b11.note_attempt('CA:FE:00:00:00:02', now=T0 + t)   # what the daemon used to do
+                b11.note_attempt('CA:FE:00:00:00:02', now=T0 + t)
         chk('re-arming the backoff on every refusal is what locked the peer out for ever',
             not b11.due('CA:FE:00:00:00:02', now=T0 + 157))
         b12 = PeerBook(os.path.join(tmp, 'p12.json'), cooldown=30.0, retry=60.0)
         b12.record('CA:FE:00:00:00:03', now=T0)
         for t in ENG:
-            pass                                   # a DECLINE calls neither record nor note_attempt
+            pass
         chk('declining to serve records nothing, so the peer is due when its cooldown expires',
             b12.due('CA:FE:00:00:00:03', now=T0 + 44)
             and b12.due('CA:FE:00:00:00:03', now=T0 + 157))
@@ -1710,16 +1331,15 @@ def _selftest():
              and abs(b10.wait('CA:FE:00:00:00:01', now=T0 + 100) - 5.0) < 1),
             b10.wait('CA:FE:00:00:00:01', now=T0 + 100))
 
-        # -- a store written before provenance existed can be healed from the peer book --------
         if src is not None:
             stb = sp_store.Store(os.path.join(tmp, 'backfill'))
             import_into(stb, src, log=lambda m: None)
             some = [c for _t, _b, c in stb.messages()][:3]
-            for c in some:                                   # pretend these arrived over the air
+            for c in some:
                 stb.add_message(c, 'inbox')
             bb = PeerBook(os.path.join(tmp, 'bf.json'))
             bb.record('96:58:CB:AA:BB:CC', got_ids=[c[0x20:0x28] for c in some])
-            for c in some:                                   # and that no origin was ever recorded
+            for c in some:
                 m = stb._load_meta(); m['origins'].pop(c[0x20:0x28].hex(), None); stb._save_meta(m)
             chk('an unstamped message is not yet recognisable as received',
                 not any(stb.is_from_air(c, 'inbox') for c in some))
@@ -1731,7 +1351,6 @@ def _selftest():
             chk('backfilling twice changes nothing',
                 backfill_air_provenance(stb, bb, log=lambda m: None) == 0)
 
-        # ---- what we serve ----
         if src is not None:
             both = select_for_peer(st, [0x00030600, 0x00020800])
             chk('we serve only titles the peer declares',
@@ -1753,7 +1372,6 @@ def _selftest():
             chk('Tomodachi Life\'s two messages both come out',
                 len(select_for_peer(st, [0x0008C500])) == 2,
                 len(select_for_peer(st, [0x0008C500])))
-            # -- OWN DATA ONLY. Two independent gates, tested separately. -----------------
             st3 = sp_store.Store(os.path.join(tmp, 'store3'))
             inbound = [c for _t, _b, c in st.messages(0x00030600)][0]
             st3.add_message(inbound, 'inbox', key=st.title_key(0x00030600),
@@ -1763,7 +1381,6 @@ def _selftest():
             chk('and it is still filed, so it can be read and verified',
                 len(st3.messages(0x00030600, 'inbox')) == 1
                 and st3.verify(0x00030600, inbound) is True)
-            # gate 2: even sitting in the outbox, air provenance disqualifies it
             st3.add_message(inbound, 'outbox', origin='air:96:58:cb:00:11:22')
             chk('gate 2: air-sourced data in the OUTBOX is refused as well',
                 select_for_peer(st3, [0x00030600]) == [],
@@ -1775,7 +1392,6 @@ def _selftest():
             chk('there is no flag that turns forwarding back on',
                 'forward' not in str(_inspect_args(select_for_peer)).lower(),
                 _inspect_args(select_for_peer))
-            # swapping the relay's data over is one step
             n_before = len(select_for_peer(st, [0x00030600, 0x00020800]))
             st5 = sp_store.Store(os.path.join(tmp, 'store5'))
             import_into(st5, src, log=lambda m: None)
@@ -1783,7 +1399,6 @@ def _selftest():
             chk('import --replace leaves exactly one copy, not two',
                 len(select_for_peer(st5, [0x00030600, 0x00020800])) == n_before,
                 (len(select_for_peer(st5, [0x00030600, 0x00020800])), n_before))
-            # an import must be able to CORRECT metadata, not only supply it the first time
             st6 = sp_store.Store(os.path.join(tmp, 'fixname'))
             import_into(st6, src, log=lambda m: None)
             st6.add_title(0x00030600, name='WRONG NAME')
@@ -1795,7 +1410,6 @@ def _selftest():
                 st5.origin([c for _t, _b, c in st5.messages(0x00030600)][0])['source']
                 == os.path.abspath(src))
 
-        # ---- the control socket ----
         args = argparse.Namespace(store=os.path.join(tmp, 'store'), cooldown=100.0, mac=None,
                                   rotate_identity=False, rotate_every='0',
                                   start_paused=False, iface='sim',
@@ -1810,12 +1424,6 @@ def _selftest():
         chk('--rotate-identity gives a different MAC each time',
             len({r2.next_identity() for _ in range(20)}) > 1)
 
-        # -- timed rotation ----------------------------------------------------------------
-        # The console writes our MAC into its MacFilter on a completed exchange and never speaks
-        # to it again -- not after 24 h, not after a reboot, not after its clock jumps three days
-        # (measured 5-7 Sep 2026). A timer is the only thing that keeps a long-running relay
-        # reachable, so these guard the timer itself and, above all, that it can only fire
-        # BETWEEN passes.
         def relay_every(name, every, **kw):
             return Relay(argparse.Namespace(**{**vars(args), 'store': os.path.join(tmp, name),
                                                'rotate_every': every, **kw}))
@@ -1836,8 +1444,6 @@ def _selftest():
             relay_every('rotB', '0').rotation_due() is False
             and relay_every('rotB2', '0').status()['next_rotation_s'] is None)
 
-        # A bad value must not crash: the unit is Restart=always with no start limit, so
-        # argparse type=int on a typo from the GUI's env file would be an endless crash loop.
         for bad in ('eight hours', '', None, '-1'):
             rb = relay_every('rotC', bad); rb.log = lambda m: None
             chk('a nonsense --rotate-every %r is ignored, not fatal' % (bad,),
@@ -1846,7 +1452,6 @@ def _selftest():
         chk('a period below the floor is raised to it, not honoured',
             rfloor.rotate_seconds() == MIN_ROTATE_SECONDS)
 
-        # -- the edge case that matters: never mid-exchange --------------------------------
         rp = relay_every('rotE', '3600')
         touched = []
         rp.set_iface_mac = lambda mac: touched.append(mac) or True
@@ -1857,10 +1462,6 @@ def _selftest():
             out['ok'] and touched == [], touched)
         chk('it schedules the change for the next pass boundary instead', rp.rotation_due())
 
-        # Turning rotation ON is the same hazard: retuning the vif means taking it down, and a
-        # pass may be holding a link at that moment. This was a real bug -- the first cut changed
-        # self.identity from the control thread, so the relay transmitted as the new MAC while the
-        # card still ACKed only the old one: a relay that looks healthy and is never answered.
         ron = relay_every('rotH', '0'); ron.log = lambda m: None
         seen = []
         ron.set_iface_mac = lambda mac: seen.append(mac) or True
@@ -1890,7 +1491,6 @@ def _selftest():
         chk('turning rotation on does not touch the interface from the control thread either',
             rep['ok'] and seen == [] and ron.identity == before, (seen, rep))
         chk('but it does make a rotation due at the next pass boundary', ron.rotation_due())
-        # and that boundary is where the vif and the identity move together
         got = ron.apply_rotation()
         chk('the pass boundary picks a new MAC and retunes the interface for it',
             got != before and seen == [got], (got, seen))
@@ -1901,8 +1501,6 @@ def _selftest():
             (ron.load_rotation() or {}).get('mac') == got)
         chk('the next pass does not rotate again', ron.apply_rotation() == got and seen == [got])
 
-        # A vif that refuses to move must NOT leave us transmitting from an address the card will
-        # not ACK -- that is indistinguishable from a console ignoring us.
         rfail = relay_every('rotI', '3600'); rfail.log = lambda m: None
         rfail.identity_since = 0.0
         held = rfail.identity
@@ -1910,7 +1508,6 @@ def _selftest():
         chk('a vif that will not change leaves the OLD identity in place',
             rfail.apply_rotation() == held and rfail.identity == held)
 
-        # -- persistence: a restart must not fall back to the blocked fixed MAC ------------
         rs = relay_every('rotF', '3600'); rs.log = lambda m: None
         rs.begin_rotation()
         first = rs.identity
@@ -1929,9 +1526,6 @@ def _selftest():
         rs4 = relay_every('rotF', '3600'); rs4.log = lambda m: None
         chk('a corrupt rotation file reads as absent', rs4.load_rotation() is None)
 
-        # -- the vif's address must match the one we transmit from -------------------------
-        # The hardware ACKs only frames addressed to the INTERFACE, so a mismatch is a relay
-        # that transmits perfectly and is never answered. `--mac` used to cause exactly that.
         def rig(relay, iface_now, set_ok=True):
             box = {'mac': iface_now, 'calls': []}
             relay.iface_mac = lambda: box['mac']
@@ -1980,16 +1574,12 @@ def _selftest():
         chk('an unreadable interface address is a NOTE, not a false alarm',
             rm5.align_iface_identity() and b5['calls'] == [] and rm5.iface_mismatch is None)
 
-        # Timed rotation is NOT exempt from this check, unlike --rotate-identity: between
-        # rotations the identity is held for hours, and for all of that time the vif has to match
-        # it or the console's directed frames go unacknowledged.
         rm6 = Relay(argparse.Namespace(**{**vars(args), 'store': os.path.join(tmp, 'macF'),
                                           'mac': 'ba:ae:6e:44:55:66', 'rotate_every': '3600'}))
         b6 = rig(rm6, 'ba:ae:6e:77:88:99')
         chk('a TIMED-rotation relay still realigns its interface at startup',
             rm6.align_iface_identity() and b6['calls'] == ['ba:ae:6e:44:55:66'], b6)
 
-        # -- an unusable interface costs the SERVICE a restart, never the machine -----------
         rgap = Relay(argparse.Namespace(**{**vars(args), 'store': os.path.join(tmp, 'gap'),
                                            'max_iface_failures': 2}))
         chk('a healthy relay does not ask to be restarted', rgap.iface_failures == 0)
@@ -2008,7 +1598,6 @@ def _selftest():
                 stat.S_IMODE(os.stat(sockp).st_mode) == 0o600,
                 oct(stat.S_IMODE(os.stat(sockp).st_mode)))
             me, other = os.getuid(), os.getuid() + 1
-            # Under /tmp because the suite's own directory is closed to other users.
             pdir = tempfile.mkdtemp(prefix='linuxpass-perm-', dir='/tmp')
             os.chmod(pdir, 0o755)
             secret = os.path.join(pdir, 'secret')
@@ -2049,7 +1638,6 @@ def _selftest():
                 stt['servable'] + stt['held_but_never_served'] >= 1
                 and stt['servable'] <= stt['messages'],
                 (stt['servable'], stt['held_but_never_served'], stt['messages']))
-            # ---- the surface a GUI drives -----------------------------------------------
             st_ = send_command(sockp, 'store')
             chk('the whole store comes back in ONE round trip', st_['ok']
                 and 'titles' in st_['store'], list(st_.get('store', {})))
@@ -2097,7 +1685,6 @@ def _selftest():
             chk('and it carries a timestamp', isinstance(enc[-1].get('when'), (int, float)))
             chk('the log comes back as lines', isinstance(send_command(sockp, 'log')['log'], list))
 
-            # destructive commands, last
             tid = st_['store']['titles'][-1]['title']
             mid = st_['store']['titles'][-1]['messages'][0]['id']
             bx = st_['store']['titles'][-1]['messages'][0]['box']
@@ -2120,7 +1707,6 @@ def _selftest():
             ctl.shutdown()
         chk('the socket is cleaned up on shutdown', not os.path.exists(sockp))
 
-        # ---- a store too deep for sun_path still gets a control socket ---------------------
         shallow = control_socket_path(os.path.join(tmp, 'store'))
         chk('a normal store keeps its socket inside it',
             shallow == os.path.join(os.path.abspath(os.path.join(tmp, 'store')), CONTROL_SOCKET))
@@ -2132,7 +1718,6 @@ def _selftest():
         chk('and both ends derive the same one', control_socket_path(deep) == dp)
         chk('different deep stores do not collide',
             control_socket_path(deep + '2') != dp)
-        # and it must actually bind
         os.makedirs(deep, exist_ok=True)
         r7 = Relay(argparse.Namespace(**{**vars(args), 'store': deep}))
         c7 = Control(control_socket_path(deep), r7)
@@ -2143,16 +1728,12 @@ def _selftest():
             chk('and it did not record a bind failure', c7.failed is None, c7.failed)
         finally:
             c7.shutdown()
-        # a bind that cannot work is reported, not thrown into the void
         c8 = Control('/nonexistent-directory-for-a-test/x.sock', r7)
         c8.start(); time.sleep(0.3)
         chk('an impossible socket path is reported on the relay log, not silently swallowed',
             c8.failed is not None, c8.failed)
         c8.shutdown()
 
-        # ---- which message rode in which object -------------------------------------------
-        # A title with two queued messages travels as ONE envelope, so object count != message
-        # count and the two cannot be reconciled by subtraction on a partial transfer.
         if src is not None:
             r3 = Relay(argparse.Namespace(**{**vars(args), 'store': os.path.join(tmp, 'store')}))
 
@@ -2173,7 +1754,6 @@ def _selftest():
                     all(objects[i][:2] == b'\x61\x61' for i in mp))
                 chk('and every envelope in the object list is mapped',
                     {i for i, o in enumerate(objects) if o[:2] == b'\x61\x61'} == set(mp))
-                # a partial transfer: only the first message object got through
                 first = min(mp)
                 part = [m for i, ids in sorted(mp.items()) if i < first + 1 for m in ids]
                 chk('a partial transfer credits only the messages that actually went',
@@ -2182,10 +1762,6 @@ def _selftest():
                 chk('and nothing is credited when no object was delivered',
                     [m for i, ids in sorted(mp.items()) if i < 0 for m in ids] == [])
 
-        # ---- the real state machine, the real captured frames, our selection --------------
-        # peer_hook tested in isolation only proves we build the right list. This drives it
-        # through sp_link's actual handshake, from the console's own recorded probe response, so
-        # the CONTRACT between the two is tested rather than assumed.
         if src is not None:
             import sp_link
             rsim = Relay(argparse.Namespace(**{**vars(args), 'store': os.path.join(tmp, 'store')}))
@@ -2200,12 +1776,6 @@ def _selftest():
             out = {}
             sp_link.simulate(verbose=0, peer_hook=_hook, out=out)
             L = out['link']
-            # NOT "reached DONE": the recording is a handshake capture and never acknowledges the
-            # content we now have to send, so a correct run waits in SYNSENT. What must hold is
-            # that the handshake itself worked with our payload attached.
-            # The MAC comes from sp_link's own recording -- which is a real capture when
-            # there is a corpus and a documentation address when there is not -- so this
-            # asks sp_link what it used rather than hardcoding either.
             sim_mac = ((corpus.vector('handshake') or {}).get('console_mac')
                        or '96:58:cb:11:22:33')
             chk('the console was identified through the real handshake',
@@ -2227,11 +1797,6 @@ def _selftest():
                 chk('with every message id accounted for in the delivery map',
                     sum(len(v) for v in rsim._pending_map.values()) == len(rsim._pending_sent))
 
-            # ---- a DECLINE must be legible in the per-run log, not just the journal --------
-            # The defect this guards: peer_hook logs its reason to the relay's logger (the
-            # journal) while sp_link writes the pass narrative to the run log, so a deliberate
-            # decline read as a console fault -- engaged, SYNSENT -> DONE, ended, no reason.
-            # Driven through the real state machine so the two loggers are tested together.
             rdec = Relay(argparse.Namespace(**{**vars(args),
                                                'store': os.path.join(tmp, 'store')}))
             rdec.book.block(sim_mac, note='selftest')
@@ -2242,19 +1807,16 @@ def _selftest():
             chk('the reason appears in the per-run log',
                 'denylist' in '\n'.join(L2.log_lines))
             chk('the relay still records it on its own side', rdec._declined == 'blocked')
-            # simulate() stops before the verdict, so drive that part explicitly.
             _tx, _ = sp_link.T.read_tx_counters('sim')
             L2.verdict(_tx, _tx, None)
             chk('and the verdict says the pass ended by our choice',
                 'we offered nothing' in '\n'.join(L2.log_lines)
                 and 'blocked' in '\n'.join(L2.log_lines))
 
-            # the cooldown path, the one that actually bit us
             rcd = Relay(argparse.Namespace(**{**vars(args),
                                               'store': os.path.join(tmp, 'store')}))
-            # the PeerBook is persisted per store, so the block above is still on file
             rcd.book.unblock(sim_mac)
-            rcd.book.record(sim_mac)          # just exchanged -> inside its cooldown
+            rcd.book.record(sim_mac)
             out3 = {}
             sp_link.simulate(verbose=0, peer_hook=rcd.peer_hook, out=out3)
             L3 = out3['link']
@@ -2262,15 +1824,12 @@ def _selftest():
             chk('and names the cooldown in the run log',
                 'cooldown' in '\n'.join(L3.log_lines))
 
-            # a pass we did serve must NOT claim we declined
             L1 = out['link']
             L1.verdict(_tx, _tx, None)
             chk('a served pass leaves the verdict clean',
                 L1.declined is None
                 and 'we offered nothing' not in '\n'.join(L1.log_lines))
 
-        # peer_hook is called with link=None in places (and by the socket tests above); the
-        # decline path must not require a link at all.
         rnl = Relay(argparse.Namespace(**{**vars(args), 'store': os.path.join(tmp, 'store')}))
         rnl.book.block('DE:AD:BE:EF:00:02')
         chk('declining without a link does not raise',
@@ -2287,7 +1846,6 @@ def _selftest():
             rnl2.peer_hook(nl, 'DE:AD:BE:EF:00:03', [{'titleID': '00020800'}]) is None)
         chk('and it is still marked on that link', getattr(nl, 'declined', None) == 'blocked')
 
-        # ---- housekeeping an unattended daemon needs ---------------------------------------
         r4 = Relay(argparse.Namespace(**{**vars(args), 'store': os.path.join(tmp, 'keep'),
                                          'keep_runs': 3}))
         rd = os.path.join(tmp, 'keep', 'runs')
@@ -2306,7 +1864,6 @@ def _selftest():
         r5.prune_runs()
         chk('--keep-runs 0 keeps everything', len(os.listdir(rd)) == 3)
 
-        # ---- the watchdog is a no-op unless systemd is actually watching --------------------
         old = os.environ.pop('NOTIFY_SOCKET', None)
         chk('sd_notify does nothing when not run under systemd', sd_notify('WATCHDOG=1') is False)
         os.environ['NOTIFY_SOCKET'] = os.path.join(tmp, 'nonexistent.sock')
@@ -2332,9 +1889,6 @@ def _selftest():
         bad = _scan_code_for_machine_kill(os.path.abspath(__file__))
         chk('nothing in this daemon can reboot the machine', not bad, bad)
 
-        # ---------------------------------------------------------------------------------
-        # The truncated-message gate. Replays the real casualty: relay_1788440865.log filed a
-        # Mii Plaza message of 24,664 B whose own header declares 32,712.
         whole = bytearray(32712)
         struct.pack_into('<I', whole, 4, 32712)
         chk('a message whose header matches its length is whole', message_is_whole(bytes(whole)))

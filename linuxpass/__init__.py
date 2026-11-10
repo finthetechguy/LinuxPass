@@ -1,10 +1,4 @@
-"""LinuxPass -- StreetPass a Nintendo 3DS from Linux.
-
-The modules in this package keep the flat ``sp_*`` names they were developed under and import
-each other directly (``import sp_link``, not ``from linuxpass import sp_link``). Importing the
-package puts its own directory on ``sys.path`` so those imports resolve wherever it is
-installed. See docs/SCRIPTS.md for why the names were left alone.
-"""
+"""LinuxPass: StreetPass a Nintendo 3DS from Linux."""
 import os
 import sys
 

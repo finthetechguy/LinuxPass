@@ -1,31 +1,5 @@
 #!/usr/bin/env python3
-"""
-Read CEC message stores out of a console NAND / SD dump.
-
-WHY THIS EXISTS. Everything below the message body is title-agnostic: the probe/0x11 declaration,
-the ee records and the 0x81 list all take a CEC title id, and a message dumped from a console's
-OutBox already carries a valid HMAC trailer. So a message from ANY title can be forwarded verbatim
-without reverse-engineering that title at all -- `sp_link --forward`. This module finds them.
-
-FILENAMES, read out of cecd.code.bin rather than guessed:
-
-    /CEC/MBoxList____     0x00C7D9      the mailbox list
-    /CEC/SessionId___     0x007B0D
-    /CEC/MacFilter___     0x007B25      the ~12 h re-StreetPass filter we clear between runs
-    <box>/BoxInfo_____    0x00A04C
-    <box>/OBIndex_____    0x00A06C      outbox index
-    <title>/MBoxInfo____  0x00C7A4
-    <title>/MBoxData.NNN  0x010750 + '%s/%s/%s.%03d'
-    OutBox__ / InBox___   0x009B54 / 0x009B84   (8 chars, not the 9 some docs give)
-
-Path templates in cecd: '%s/%s', '%s/%s/%s', '%s/%s/%s/_%s', '%s/%s/%s.%03d'.
-
-WHAT IS PROVEN vs INFERRED. The filenames and the container format are proven. The MBoxList entry
-layout is INFERRED from its size: 396 = 12 + 24 * 16, and 24 is exactly the documented max count of
-an `ee` record (sp_cec: count <= 0x18) -- a cross-check, not a proof. So `scan_tree` does not rely
-on any index structure at all: it finds messages by container magic and validates each one through
-sp_cec, which works whatever the surrounding bookkeeping looks like.
-"""
+"""Read CEC message stores out of a console NAND / SD dump."""
 import os, struct, hashlib
 
 import sp_cec
@@ -46,22 +20,7 @@ CEC_FILENAMES = {
 
 
 def parse_mboxlist(data):
-    """`data:/CEC/MBoxList____` -- the console's list of ENABLED StreetPass titles.
-
-        +0x00 u16   magic 0x6868
-        +0x02 u16   padding
-        +0x04 u32   version (always 1 on both consoles)
-        +0x08 u32   COUNT
-        +0x0C       COUNT entries of 16 bytes: 8 ASCII lower-case hex digits (the CEC title id,
-                    exactly the directory name under CEC/) then 8 zero bytes.
-
-    CORRECTED 2 Sep 2026. This used to read the count from +0x04 and return the raw 16-byte
-    entries. The only ground truth available at the time was an EMPTY emulator store, in which
-    the version field is 1 and there are no entries -- indistinguishable from a one-entry list, so
-    the mistake was invisible. The 2DS XL's real store settles it: +0x04 = 1 while +0x08 = 12, and
-    there are exactly 12 CEC/<title>/ directories, matching the 12 services the console advertises
-    in its probe. [D]
-    """
+    """`data:/CEC/MBoxList____`: the console's list of enabled StreetPass titles."""
     if len(data) < MBOXLIST_HDR or struct.unpack_from('<H', data, 0)[0] != MBOXLIST_MAGIC:
         raise ValueError('not an MBoxList (magic %r)' % data[:2])
     version, count = struct.unpack_from('<II', data, 4)
@@ -80,14 +39,7 @@ def parse_mboxlist(data):
 
 
 def parse_mboxinfo(data):
-    """`<title>/MBoxInfo____` (96 B). Magic 'cc', the CEC title id at +0x04, and at **+0x10 the
-    title's 32-byte HMAC key**.
-
-    Proven: the key this yields for 00020800 is byte-identical to the Mii Plaza key we recovered by
-    brute-forcing 32-byte windows of MiiPlaza/code.bin against two known (body, trailer) pairs. So
-    every title's message-signing key is sitting in the console's own CEC store -- no per-title
-    reverse engineering is needed to EDIT a message, only to understand its payload.
-    """
+    """`<title>/MBoxInfo____` (96 B)."""
     if len(data) < 0x30 or data[:2] != b'cc':
         raise ValueError('not an MBoxInfo (magic %r)' % data[:2])
     return {'cec_title_id': struct.unpack_from('<I', data, 4)[0],
@@ -105,10 +57,7 @@ def parse_boxinfo(data):
 
 
 def title_metadata(image_or_fs):
-    """-> {cec_title_id: {'name', 'hmac_key', 'inbox', 'outbox'}} from a SAVE image.
-
-    The display name is the UTF-16 string in `<title>/MBoxData.010`.
-    """
+    """-> {cec_title_id: {'name', 'hmac_key', 'inbox', 'outbox'}} from a SAVE image."""
     fs = (image_or_fs if isinstance(image_or_fs, sp_savefs.SaveFS)
           else sp_savefs.SaveFS(image_or_fs if isinstance(image_or_fs, (bytes, bytearray))
                                 else open(image_or_fs, 'rb').read()))
@@ -174,12 +123,7 @@ def find_containers(data):
 
 
 def scan_save_image(path_or_data):
-    """Read a DISA 'SAVE' partition image through the filesystem, not by carving.
-
-    Carving a real 28 MB CEC partition found 7 Mii Plaza containers of which only 1 had a valid
-    HMAC -- the other 6 were stale copies sitting in unallocated blocks. Reading the FAT gives the
-    live files only, with their real paths, and every one verifies.
-    """
+    """Read a DISA 'SAVE' partition image through the filesystem, not by carving."""
     data = path_or_data if isinstance(path_or_data, (bytes, bytearray)) else open(path_or_data, 'rb').read()
     fs = sp_savefs.SaveFS(data)
     found = []
@@ -210,7 +154,7 @@ def scan_save_image(path_or_data):
 
 
 def scan_any(path):
-    """A SAVE image, a single file, or a directory tree -- whichever it is."""
+    """Scan a SAVE image, a single file, or a directory tree."""
     if os.path.isdir(path):
         return scan_tree(path)
     data = open(path, 'rb').read()
@@ -229,11 +173,7 @@ def scan_any(path):
 
 
 def scan_tree(root, follow_symlinks=False):
-    """Walk a dump and return every CEC message found, with provenance.
-
-    Deliberately structure-free: it does not need the index files to be intact, so it works on a
-    partial dump, a raw image carved out of NAND, or a directory someone copied by hand.
-    """
+    """Walk a dump and return every CEC message found, with provenance."""
     found = []
     for dirpath, _dirs, files in os.walk(root, followlinks=follow_symlinks):
         for fn in sorted(files):
@@ -307,8 +247,6 @@ def _selftest():
 
     here = os.path.dirname(os.path.abspath(__file__))
 
-    # MBoxList, against the real emulator file if present
-    # An emulator's NAND, if one is installed. $LINUXPASS_EMU_NAND overrides the guess.
     _share = (os.environ.get('XDG_DATA_HOME')
               or os.path.join(os.path.expanduser('~'), '.local', 'share'))
     ml = os.environ.get('LINUXPASS_EMU_NAND') or os.path.join(
@@ -324,8 +262,6 @@ def _selftest():
         chk('that store is empty (no populated entries)', info['nonempty'] == [])
     chk('a non-MBoxList is rejected', _raises(lambda: parse_mboxlist(b'zz' + b'\x00' * 400)))
 
-    # The discriminating case the emulator store could not provide: a POPULATED MBoxList. The 2DS
-    # XL's own store lists 12 enabled titles, and they must be exactly the CEC/<title>/ directories.
     import lp_corpus as corpus, lp_keys as _k
     if _k.selftest_keys():
         print('  (no console keys found -- running on generated throwaway keys)')
@@ -343,9 +279,6 @@ def _selftest():
         chk('every listed title is one the console advertises in its probe',
             all(t is not None for t in ml2['titles']))
 
-    # Container detection. A captured console message is used when the corpus has one;
-    # otherwise one is BUILT, which has the same envelope, header and sizes -- everything
-    # these checks are actually about.
     real = corpus.load('plaza_message')
     if real is None:
         import sp_build
@@ -360,13 +293,11 @@ def _selftest():
         container_at(hashlib.sha256(b'x').digest() * 8) is None)
     chk('a zeroed blob is not mistaken for a container', container_at(b'\x00' * 0x200) is None)
 
-    # embedded / concatenated
     blob = b'\xAA' * 0x40 + real[0x14:] + b'\xBB' * 0x30 + real[0x14:]
     cs = find_containers(blob)
     chk('two concatenated containers are both found at the right offsets',
         [x['offset'] for x in cs] == [0x40, 0x40 + 0x7FC8 + 0x30], str([x['offset'] for x in cs]))
 
-    # a synthetic dump tree, laid out with cecd's real filenames
     tmp = tempfile.mkdtemp()
     try:
         ob = os.path.join(tmp, 'CEC', '00020800', CEC_FILENAMES['outbox'])
@@ -392,7 +323,6 @@ def _selftest():
         chk('harvested bytes match the source',
             open(os.path.join(out, written[0]), 'rb').read() == real[0x14:0x14 + 0x7FC8])
         chk('summarise names the known title', 'StreetPass Mii Plaza' in summarise(got))
-        # and the harvested message must round-trip straight into a sendable outbox
         import sp_build
         wire = sp_build.as_wire(open(os.path.join(out, written[0]), 'rb').read())
         box = sp_build.build_outbox(wire)
@@ -405,7 +335,6 @@ def _selftest():
     chk('scanning a tree with no CEC data returns nothing', scan_tree(os.path.join(here, 'nwm')) == []
         if os.path.isdir(os.path.join(here, 'nwm')) else True)
 
-    # SAVE-image path, against the real console partition if present
     img = corpus.path('console_nand_3') or corpus.path('console_nand') or ''
     if os.path.exists(img):
         ms = scan_save_image(img)

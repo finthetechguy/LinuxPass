@@ -1,31 +1,5 @@
 #!/usr/bin/env python3
-"""
-The optional test corpus: real captures and console dumps, which are NOT shipped.
-
-Several self-tests are regressions against real hardware -- a captured console frame that
-must be reproduced byte-for-byte, a real CEC message that must parse. That data is a
-recording of specific consoles: it carries their IDs, their session MACs and their Mii
-names, so it cannot go in a public repository.
-
-The tests that need it therefore ask for it by a *logical* name and report `[SKIP]` when it
-is absent. Everything that can be proven with synthetic data still runs, so a clone with no
-corpus at all has a self-test suite that passes.
-
-To run the full suite, point LinuxPass at your own corpus:
-
-    $LINUXPASS_CORPUS         a directory, or
-    ~/.config/linuxpass/corpus/, or
-    ./tests/corpus/           (git-ignored)
-
-A corpus directory may contain `manifest.json` mapping logical names to filenames:
-
-    {"plaza_message":  "cecmsg_aabbcc_to_ddeeff_5.bin",
-     "console_nand":   "partitionA.bin"}
-
-Without a manifest the logical name is tried as a filename directly. `vectors.json` in the
-same directory supplies the numeric regression vectors (console IDs, MACs, expected keys);
-see docs/wiki/Running-the-self-tests.md for its shape.
-"""
+"""The optional test corpus: real captures and console dumps, which are not shipped."""
 import json
 import os
 
@@ -93,11 +67,7 @@ def path(name):
 
 
 def dir():
-    """The first existing corpus directory, or None.
-
-    Blocks that need a whole tree rather than one named file (a directory of harvested
-    outbox messages, say) resolve it through here and skip when it is None.
-    """
+    """The first existing corpus directory, or None."""
     for d in dirs():
         if os.path.isdir(d) and (os.path.isfile(os.path.join(d, MANIFEST))
                                  or os.path.isfile(os.path.join(d, VECTORS))):

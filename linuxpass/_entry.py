@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Console entry points, so `pip install .` gives you `linuxpass` and `linuxpass-gui`.
-
-The modules import each other flat (`import sp_link`, not `from linuxpass import sp_link`),
-so importing this package puts its own directory on `sys.path` first -- see __init__.py.
-"""
+"""Console entry points for the installed package."""
 import os
 import sys
 

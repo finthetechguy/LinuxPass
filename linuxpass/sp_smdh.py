@@ -1,47 +1,5 @@
 #!/usr/bin/env python3
-"""
-Plaza body regions A and B: the featured title's SMDH (metadata + icons).
-
-WHAT THEY ARE. `meet_Cec_BuildOutgoingBody` only CLEARS body[0 .. 0x36B8); `sub_1975A4` copies the
-range forward from the console's own previous Outbox message. The real producer is
-**`sub_1D1584`**, which allocates 0x2038 and 0x1680, links them, and fills the pair from a title id:
-
-    r6 = alloc(0x2038)                  ; region A
-    r7 = alloc(0x1680)                  ; region B
-    *(u32*)(r6 + 0x2034) = r7           ; A -> B
-    sub_2000E4(?, r6, titleId_u64, -1)  ; -> sub_154994, the SMDH reader
-    if (titleHigh >> 14) != 0x10 ...    ; i.e. category 0x0004xxxx, a normal application
-
-`sub_2000E4` rejects titleId 0 and 0xFFFFFFFFFFFFFFFF -- the same sentinel `sub_1975A4` writes on
-failure -- and the receive-side validator `sub_19C338` rejects region A when its first 8 bytes are
-all-zero or all-0xFF, and requires the u32 at +0x2030 to be 0, 1 or 2. The sanitiser
-`sub_2BAC18` re-links `bufA + 0x2034 = bufB` after copying the two regions into fresh allocations,
-which is what tells you they are one logical object split across the wire.
-
-LAYOUT (all offsets confirmed against two real console messages):
-
-    region A, body 0x0000, 0x2038 bytes
-      +0x0000  u64   title id of the featured title   (0 / ~0 == none)
-      +0x0010  u32   region lockout (0x7FFFFFFF observed == all regions)
-      +0x0030  16 x 0x200  SMDH title entries, per language:
-                    +0x000  0x80  short description  (0x40 UTF-16 units)
-                    +0x080  0x100 long description   (0x80 UTF-16 units)
-                    +0x180  0x80  publisher          (0x40 UTF-16 units)
-      +0x2030  u32   enum, must be 0/1/2
-      +0x2034  u32   pointer to region B (zero on the wire, re-linked on receive)
-
-    region B, body 0x2038, 0x1680 bytes
-      +0x0000  0x0480  small icon 24x24 RGB565, 3DS 8x8 Z-order tiled
-      +0x0480  0x1200  large icon 48x48 RGB565, ditto
-
-EVIDENCE the icons really are icons: decoding region B's large icon with the standard 3DS tiling
-gives a coherent image, mean horizontal luminance delta 11.5 versus 61.5 for the same pixels
-shuffled. Both captured consoles carry titleId 000400000D921E00 ("Homebrew Launcher" /
-"By Many People"), which is why their regions A and B are byte-identical.
-
-This is the last piece of the body that had to be replayed from a captured message; `build_region_a`
-and `build_region_b` here synthesise both from scratch.
-"""
+"""Plaza body regions A and B: the featured title's SMDH (metadata + icons)."""
 import struct
 
 REGION_A_OFF, REGION_A_LEN = 0x0000, 0x2038
@@ -78,7 +36,7 @@ def parse_region_a(body):
                        'publisher': _utf16z(a[b + SHORT_LEN + LONG_LEN:b + TITLE_STRIDE])})
     return {'title_id': tid,
             'has_title': tid not in (0, NO_TITLE),
-            'category_ok': ((tid >> 32) >> 14) == 0x10,      # sub_1D1584's own check
+            'category_ok': ((tid >> 32) >> 14) == 0x10,
             'region_lockout': struct.unpack_from('<I', a, 0x10)[0],
             'titles': titles,
             'enum_2030': struct.unpack_from('<I', a, 0x2030)[0],
@@ -116,8 +74,7 @@ def encode_icon(px):
 
 def build_region_a(title_id, short='', long='', publisher='',
                    region_lockout=0x7FFFFFFF, enum_2030=0):
-    """Synthesise region A. The same strings go in every language slot, which is what the
-    captured Homebrew Launcher SMDH does."""
+    """Synthesise region A."""
     a = bytearray(REGION_A_LEN)
     struct.pack_into('<Q', a, 0, title_id)
     struct.pack_into('<I', a, 0x10, region_lockout)
@@ -192,8 +149,6 @@ def _selftest():
     import lp_corpus as corpus
     raw = corpus.load('plaza_message')
     if raw is None:
-        # No corpus: the checks BELOW that read a real console's regions cannot run, but the
-        # build/parse half only needs a body-shaped canvas, so it still does.
         body = bytes(sp_cec.PLAZA_BODY_SIZE)
     else:
         b = raw[0x14:]
@@ -216,7 +171,6 @@ def _selftest():
         chk('icon pointer is zero on the wire', ta['icon_ptr'] == 0)
         chk('region A passes the receive gate', validate_region_a(body)[0])
 
-        # icons: decode -> encode must be lossless, and the image must be spatially coherent
         for large, dim in ((False, 24), (True, 48)):
             px = decode_icon(body, large=large)
             off = LARGE_ICON_OFF if large else SMALL_ICON_OFF
@@ -236,7 +190,6 @@ def _selftest():
             chk('%dx%d icon is a coherent image, not noise' % (dim, dim),
                 real < d2 / 2, 'delta %.1f vs shuffled %.1f' % (real, d2 / (dim * (dim - 1))))
 
-    # build from scratch, then read back through the same parser
     ra = build_region_a(0x0004000012345600, 'LinuxPass', 'StreetPass from Linux', 'LinuxPass')
     rb = build_region_b(fill=0x7BEF)
     nb = write_regions(body, ra, rb)

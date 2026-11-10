@@ -1,39 +1,11 @@
 #!/usr/bin/env python3
-"""The relay's OWN identity: a Mii, a greeting and a profile card that belong to this box.
-
-Until now the relay served a copy of some console's data, which works but is a mirror, not a
-resident. This builds a Mii Plaza message from nothing -- no captured input -- whose Mii, name,
-greeting, card and featured title are the relay's own, and files it in the store's outbox so it is
-served like any other message the operator supplied.
-
-**Everything is derived from the store path**, through the same SHA-256 that `sp_relay` uses for
-the fixed MAC. So the identity is stable across restarts, reinstalls and rebuilds of the message,
-and -- the part that matters -- the Mii's creator MAC is the MAC the relay actually transmits from.
-A Mii whose creator MAC is some other device is a small lie that a curious person can read straight
-out of the CFL block; there is no reason to tell it.
-
-Authoring does NOT replace importing. A store can hold an authored Mii Plaza message and an
-imported Mario Kart 7 ghost side by side, and `sp_relay` serves both -- they are both outbox
-content the operator put there. Note that if you author a Plaza message and leave an imported one
-in the outbox, BOTH are offered (two messages of one title, which a console accepts happily -- see
-MULTI_TITLE.md). Use `--replace` if you meant to swap rather than add.
-
-    sp_identity.py show   --store relay_store
-    sp_identity.py seed   --store relay_store --mii-name Relay --greeting "Hello from Linux"
-    sp_identity.py seed   --store relay_store --replace        # swap out whatever Plaza data
-"""
+"""The relay's own identity: a Mii, a greeting and a profile card that belong to this box."""
 import os, sys, json, struct, hashlib, argparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sp_build, sp_cec, sp_store, sp_mii
 
-#: The same string `sp_relay.Relay.fixed_identity` hashes. One seed, one identity: if these ever
-#: diverge, the Mii claims to have been made on a device the relay is not.
-#:
-#: DELIBERATELY NOT RENAMED with the rest of the project. This is a derivation constant, not a
-#: name: it is hashed with the store path to produce the relay's MAC and its Mii id. Changing it
-#: would silently hand every existing installation a new identity -- a new address on the air and
-#: a different Mii in every plaza that has already met it. It is invisible to users, so it stays.
+# Do not rename: hashed with the store path, so a change gives every install a new identity.
 SEED_PREFIX = 'sp-relay:'
 MII_NAME_MAX = 10          # 20 bytes of UTF-16LE at CFL+0x1A
 GREETING_MAX = 16          # 0x20 bytes at body+OFF_GREETING
@@ -44,20 +16,13 @@ def seed_digest(store_path):
 
 
 def derive(store_path):
-    """-> the relay's stable identity, from its store path alone.
-
-    `mac` is byte-for-byte what `sp_relay.Relay.fixed_identity()` produces; there is a selftest
-    that fails if the two ever drift apart.
-    """
+    """-> the relay's stable identity, from its store path alone."""
     h = seed_digest(store_path)
     return {
         'store': os.path.abspath(store_path),
         'mac': 'ba:ae:6e:%02x:%02x:%02x' % (h[0], h[1], h[2]),
-        # [P] sp_mii.random_mii_id: bit 5 of the first byte must be CLEAR or meet_ValidateMii
-        # (0x159A8C) drops the whole message -- silently, after cecd has already lit the green LED.
-        # High nibble 9 both clears it and matches all four real ids we have observed.
+        # Bit 5 of the first byte must be clear, or the plaza drops the message after the green LED.
         'mii_id': (0x90 | (h[3] & 0x0F)) | (int.from_bytes(h[4:7], 'little') << 8),
-        # cosmetic, but derived so two relays are visibly different people rather than clones
         'face_shape': h[7] % 12,
         'hat': h[8] % 76,
         'dream': h[9] % 20,
@@ -70,11 +35,7 @@ def build_message(store_path, mii_name='Relay', author_name='LinuxPass',
                   greeting='Hello from Linux', hits=0, population=0, pet=0,
                   title_short='LinuxPass', title_long='StreetPass from Linux',
                   title_publisher='LinuxPass', when=None, **extra):
-    """-> a complete Mii Plaza wire message that is this relay's own.
-
-    Raises rather than truncating: a name silently cut in half is a worse outcome than an error,
-    because it only shows up as a wrong name on somebody else's console days later.
-    """
+    """-> a complete Mii Plaza wire message that is this relay's own."""
     if len(mii_name) > MII_NAME_MAX:
         raise ValueError('a Mii name is at most %d characters, got %d (%r)'
                          % (MII_NAME_MAX, len(mii_name), mii_name))
@@ -119,8 +80,6 @@ def seed(store, store_path=None, replace=False, log=print, **kw):
     return p
 
 
-# ---------------------------------------------------------------------------------------------
-
 def _selftest():
     import tempfile, shutil
     ok = tot = 0
@@ -137,7 +96,6 @@ def _selftest():
     try:
         sp = os.path.join(tmp, 'relay_store')
 
-        # ---- the identity is stable, and it agrees with the relay's own MAC ----------------
         a, b = derive(sp), derive(sp)
         chk('the identity is deterministic', a == b, a['mac'])
         chk('and a different store is a different identity',
@@ -150,7 +108,6 @@ def _selftest():
         chk('the Mii\'s creator MAC IS the MAC the relay transmits from',
             sp_relay.Relay(ns).fixed_identity() == a['mac'], a['mac'])
 
-        # ---- the Mii id must pass the plaza's own validator --------------------------------
         chk('bit 5 of the Mii id\'s first byte is clear, as meet_ValidateMii demands',
             not ((a['mii_id'] & 0xFF) >> 5) & 1, '%08x' % a['mii_id'])
         chk('and it has the high nibble every real id we have seen carries',
@@ -159,7 +116,6 @@ def _selftest():
         chk('64 different stores give 64 different Miis, all valid',
             len(ids) == 64 and all(not ((i & 0xFF) >> 5) & 1 for i in ids))
 
-        # ---- the message itself -------------------------------------------------------------
         m = build_message(sp, mii_name='Relay', greeting='Hello from Linux')
         chk('it is the same size as a real plaza message', len(m) == 32732, len(m))
         c = m[sp_build.ENVELOPE_LEN:]
@@ -175,9 +131,7 @@ def _selftest():
         chk('the HMAC trailer verifies under the plaza key',
             _h.new(sp_build.plaza_hmac_key(), body, hashlib.sha256).digest()
             == c[h['header_size'] + h['body_size']:h['total_size']])
-        # The Mii rides in the body AES-CCM-wrapped (APT keyslot 0x31), so a byte scan finds
-        # nothing -- unwrap it the way the plaza does and read the fields back out.
-        cfl, mac_ok = sp_mii.read_plaza_mii(body)     # -> (CFLStoreData, AES-CCM tag ok)
+        cfl, mac_ok = sp_mii.read_plaza_mii(body)
         fields = sp_mii.parse_cfl(cfl)
         valid, why = sp_mii.validate_cfl(cfl)
         chk('the wrapped Mii\'s AES-CCM tag verifies', mac_ok)
@@ -196,7 +150,6 @@ def _selftest():
             body[sp_build.OFF_GREETING:sp_build.OFF_GREETING + 32]
             .decode('utf-16-le', 'replace').split('\x00')[0])
 
-        # ---- names and greetings are refused, not silently cut ------------------------------
         chk('an over-long Mii name is refused',
             _raises(lambda: build_message(sp, mii_name='ElevenChars')))
         chk('an over-long greeting is refused',
@@ -204,7 +157,6 @@ def _selftest():
         chk('a Mii name the console rejects is refused too',
             _raises(lambda: build_message(sp, mii_name='a%b')))
 
-        # ---- seeding a store ----------------------------------------------------------------
         st = sp_store.Store(sp)
         seed(st, sp, log=lambda m: None, mii_name='Relay')
         got = st.messages(sp_build.PLAZA_TITLE, 'outbox')
@@ -218,8 +170,6 @@ def _selftest():
         chk('and it is NOT counted as something a console gave us',
             not st.is_from_air(got[0][2], 'outbox'))
 
-        # seeding twice without --replace adds a second, which a console accepts but is rarely
-        # what anyone means
         seed(st, sp, log=lambda m: None, mii_name='Relay', greeting='second')
         chk('seeding again ADDS a message unless told to replace',
             len(st.messages(sp_build.PLAZA_TITLE, 'outbox')) == 2)
@@ -227,7 +177,6 @@ def _selftest():
         chk('--replace leaves exactly one',
             len(st.messages(sp_build.PLAZA_TITLE, 'outbox')) == 1)
 
-        # ---- authored and imported content coexist ------------------------------------------
         import lp_corpus as corpus
         dump = corpus.path('console_nand_2') or corpus.path('console_nand') or ''
         if os.path.exists(dump):

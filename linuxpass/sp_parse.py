@@ -1,15 +1,7 @@
 #!/usr/bin/env python3
-"""
-Parse a monitor-mode pcap for StreetPass 802.11 frames.
-Classifies: probe-req/resp (SSID Nintendo_3DS_continuous_scan_000 + Nintendo vendor IE 0xDD/00:1F:32),
-action frames (cat 0x7f), CCMP data frames. Extracts vendor-IE fields (consoleID/services) + MACs.
-Usage: sp_parse.py capture.pcap
-"""
+"""Parse a monitor-mode pcap for StreetPass 802.11 frames."""
 import sys, struct, binascii
-# scapy is needed only by the pcap-READING half of this module (strip_fcs / classify / main).
-# The frame BUILDERS are pure struct code, and the transmit box -- the ath9k machine running
-# sp_probe_tx.py -- has no scapy installed and does not need it. So importing this module must not
-# require scapy; the readers below raise a clear error if it is genuinely missing.
+# scapy is only needed for reading pcaps. The frame builders work without it.
 try:
     from scapy.all import PcapReader, RadioTap, Dot11, Dot11Elt, Dot11ProbeReq, Dot11ProbeResp
     HAVE_SCAPY = True
@@ -27,9 +19,7 @@ def _need_scapy(what):
 NIN_OUI = b'\x00\x1f\x32'
 SP_SSID = b"Nintendo_3DS_continuous_scan_000"
 
-# Known Nintendo IEEE OUIs (a real 3DS burns a Nintendo OUI, but StreetPass PROBES use a
-# randomized locally-administered MAC — so peer/exchange detection must key off the console
-# MACs actually seen carrying the Nintendo vendor IE, not off the OUI.)
+# StreetPass probes use randomized MACs, so detect peers by the vendor IE.
 NIN_OUIS = {"00:1f:32","00:1a:e9","00:09:bf","00:16:56","00:17:ab","00:19:1d","00:1b:ea",
             "00:1c:be","00:1d:bc","00:1e:35","00:21:bd","00:22:4c","00:23:cc","00:24:1e",
             "00:24:44","00:25:a0","00:26:59","00:27:09","0c:fe:45","2c:10:c1","34:af:2c",
@@ -40,14 +30,7 @@ def _nin_oui(mac):
     return bool(mac) and mac[:8].lower() in NIN_OUIS
 
 def is_laa(mac):
-    """Locally-administered (randomized) UNICAST MAC — what 3DS StreetPass probes use.
-
-    Both bits of the first octet matter and both are checked:
-      bit 1 (0x02) = locally administered  -> must be SET   (a randomized address)
-      bit 0 (0x01) = group/multicast       -> must be CLEAR (a real peer, not a group)
-    Skipping the group check makes every IPv6-multicast frame (dst 33:33:xx:xx:xx:xx, and
-    0x33 & 0x02 is set) look like a console-to-console frame, which falsely satisfies the
-    "protected data frames captured" test on ambient neighbour traffic."""
+    """Locally-administered (randomized) unicast MAC, as 3DS StreetPass probes use."""
     if not mac or mac.lower() == "ff:ff:ff:ff:ff:ff":
         return False
     try:
@@ -57,17 +40,7 @@ def is_laa(mac):
     return bool(first & 0x02) and not (first & 0x01)
 
 def parse_vendor_tlv(body):
-    """Walk the vendor-IE TLV stream exactly as cecd sub_104494 does.
-
-    Record = {u16 hdr; u8 data[len]} with hdr bits [3:0]=typeA, [7:4]=typeB, [15:8]=len.
-    Proven from firmware (cecd 0x104494: `lsls #0x1c/lsrs #0x1c` -> A, `lsls #0x18/lsrs #0x1c` -> B,
-    `lsls #0x10/lsrs #0x18` -> len, cursor advanced by len+2) and confirmed against real captures:
-    the 82-byte probe IE payload parses cleanly and exhaustively from offset 4 (after OUI+subtype)
-    into exactly two records -- (A=1,B=1,len=66) service list and (A=0,B=0xF,len=8) session token --
-    and offset 4 is the ONLY start offset that yields a clean walk.
-
-    Returns (records, trailing) where records is a list of dicts and trailing is any undecodable tail.
-    """
+    """Walk the vendor-IE TLV stream exactly as cecd sub_104494 does."""
     recs = []
     i = 0
     while i + 2 <= len(body):
@@ -81,8 +54,7 @@ def parse_vendor_tlv(body):
 
 
 def parse_services(data):
-    """Service list record payload: titleID_low(4) + flags(1), plus 6 trailing bytes if flags&0x02.
-    Each titleID is a CEC title ID; uniqueId = cecTitleId >> 8."""
+    """Service list record: titleID_low(4) + flags(1), plus 6 trailing bytes if flags&0x02."""
     services = []
     i = 0
     while i + 5 <= len(data):
@@ -95,16 +67,7 @@ def parse_services(data):
 
 
 def build_probe(src_mac, token8, services, seq=0):
-    """Build a StreetPass probe request. The inverse of parse_vendor_ie + the IE layout.
-
-    services: iterable of (title_id:int, flags:int, trailing:bytes). ALL services live in ONE
-    TLV record (A=1,B=1,len=N) as concatenated 5-byte entries -- a 12-title console emits a
-    single len-66 record, not 12 records. The title id is stored BIG-endian. A service whose
-    flags have 0x02 set carries 6 extra bytes (a MAC) after the flags byte.
-
-    Verified: rebuilds 1647/1647 captured probes byte-identically across 6 captures, two
-    consoles, and both 1-service and 12-service probes.
-    """
+    """Build a StreetPass probe request."""
     fc, dur, bcast = b'\x40\x00', b'\x00\x00', b'\xff' * 6
     hdr = fc + dur + bcast + bytes(src_mac) + bcast + struct.pack('<H', (seq & 0xFFF) << 4)
     ies  = b'\x00\x20' + b'Nintendo_3DS_continuous_scan_000'
@@ -118,12 +81,7 @@ def build_probe(src_mac, token8, services, seq=0):
 
 
 def parse_vendor_ie(data):
-    """Parse the Nintendo StreetPass vendor IE.
-
-    Layout: OUI(3) | subtype(1) | TLV stream.  The TLV walk and the (A=0,B=0xF,len=8) token record
-    are both taken from cecd firmware, not from the shape of one console's capture -- so a peer with
-    a different enabled-title set, or with extra TLV records, still decodes correctly.
-    """
+    """Parse the Nintendo StreetPass vendor IE."""
     out = {}
     if data[:3] != NIN_OUI:
         return out
@@ -135,8 +93,8 @@ def parse_vendor_ie(data):
     if trailing:
         out['tlv_trailing'] = trailing.hex()          # non-empty => walk did not fit; treat as suspect
     for r in recs:
-        if (r['a'], r['b']) == (1, 1):                # service list
-            out['protocol_id'] = 0x11                 # == (b<<4)|a, kept for continuity with old notes
+        if (r['a'], r['b']) == (1, 1):
+            out['protocol_id'] = 0x11
             out['svc_len'] = r['len']
             out['services'] = parse_services(r['data'])
         elif (r['a'], r['b'], r['len']) == (0, 0xF, 8):   # the record cecd_derive_ccmp_key asks for
@@ -149,21 +107,7 @@ def parse_vendor_ie(data):
 
 
 def strip_fcs(pkt, mpdu):
-    """Return the MPDU with the trailing 4-byte 802.11 FCS removed, if the radio appended one.
-
-    THIS IS LOAD-BEARING FOR DECRYPTION. CCMP takes the last 8 bytes of the MPDU as the MIC, so a
-    frame that still carries its FCS makes `decrypt_and_verify` fail on EVERY key -- which looks
-    exactly like "the key derivation model is wrong" rather than "four extra bytes".
-
-    Whether the FCS is present is a per-RADIO property, not a per-capture one, and the two-sniffer
-    setup mixes both in one run: observed 30 Aug 2026, the ath9k box sets radiotap Flags bit 0x10
-    (FCS-at-end) and appends it, the MT7902 laptop does not. So this must be decided per frame.
-
-    Decision order:
-      1. radiotap Flags bit 0x10 set  -> strip (authoritative; the radio says so)
-      2. otherwise, if CRC-32 of mpdu[:-4] equals the last 4 bytes -> strip (flag missing but the
-         FCS is demonstrably there; a false positive needs a 1-in-2^32 coincidence)
-    """
+    """Return the MPDU with the trailing 4-byte 802.11 FCS removed, if the radio appended one."""
     if len(mpdu) < 8:
         return mpdu
     rt = pkt.getlayer(RadioTap)
@@ -184,7 +128,7 @@ def classify(pkt):
     d = pkt[Dot11]
     t, st = d.type, d.subtype
     info = {'a1': d.addr1, 'a2': d.addr2, 'a3': d.addr3, 'type': t, 'subtype': st}
-    if t == 0 and st in (4, 5):            # probe req/resp
+    if t == 0 and st in (4, 5):
         info['kind'] = 'probe_req' if st == 4 else 'probe_resp'
         el = pkt.getlayer(Dot11Elt)
         while el:
@@ -194,13 +138,13 @@ def classify(pkt):
                 if v: info['nintendo_ie'] = v
             el = el.payload.getlayer(Dot11Elt)
         return info
-    if t == 0 and st == 13:                # action frame
+    if t == 0 and st == 13:
         info['kind'] = 'action'
         raw = bytes(pkt[Dot11].payload)
         info['action_cat'] = raw[0] if raw else None
         info['action_hex'] = raw[:16].hex()
         return info
-    if t == 2:                             # data
+    if t == 2:
         info['kind'] = 'data_qos' if (st & 8) else 'data'
         info['protected'] = bool(d.FCfield & 0x40)
         info['mpdu_hex'] = strip_fcs(pkt, bytes(pkt[Dot11])).hex()   # full MPDU for CCMP decrypt, FCS removed
@@ -208,16 +152,7 @@ def classify(pkt):
     return None
 
 def main(path, verbose=True):
-    """Two-pass: (1) classify every frame + learn the console MACs from the Nintendo-IE probes;
-    (2) keep StreetPass-relevant frames, including the CCMP data / cat-0x7f action exchange BETWEEN
-    those console MACs. Returns (sp_frames, meta). meta has: console_macs {mac->token},
-    exchange_data (protected data MPDUs between consoles), and the raw counts.
-
-    `path` may be a single pcap or a LIST of pcaps. Multiple files are for the two-sniffer setup
-    (one radio per channel): the frames are simply pooled. Ordering across files does not matter --
-    classification is per-frame, and payload reassembly is keyed on the CCMP PN (a per-key monotonic
-    counter), not on capture time. So the two radios need no clock sync, and if they happen to sit
-    on the same channel the duplicate MPDUs are dropped by sp_cec.reassemble()'s PN dedup."""
+    """Classify every frame, learn the console MACs, and keep StreetPass-relevant frames."""
     paths = [path] if isinstance(path, (str, bytes)) else list(path)
 
     def _packets():
@@ -236,20 +171,12 @@ def main(path, verbose=True):
         if 'nintendo_ie' in c and c.get('a2'):
             tok = c['nintendo_ie'].get('consoleID')
             console_macs.setdefault(c['a2'], tok)
-            # The on-air 8-byte token ROTATES PER SCAN SESSION, and a single capture is long
-            # enough to span a rotation (observed: streetpass_1787921701.pcap has two tokens for
-            # 96:58:cb:44:55:66). So one MAC -> many tokens is NORMAL, not an error. What matters
-            # is that the KDF is fed the token in force during the exchange, which is not
-            # necessarily the first one seen -- hence keep every token, in order of first sight,
-            # and let the decrypt stage try them all against the CCMP MIC.
+            # The token rotates per scan session, so one MAC can have many tokens.
             if tok and tok not in console_tokens.setdefault(c['a2'], []):
                 console_tokens[c['a2']].append(tok)
     cmset = set(console_macs)
 
     def is_exchange(c):
-        # a protected data frame or cat-0x7f action frame between two consoles = the exchange.
-        # match by learned console MAC, or fall back to "both endpoints are randomized (LAA) MACs"
-        # (covers the case where the linked-session MAC differs from the probe MAC).
         a1, a2 = c.get('a1'), c.get('a2')
         peer = (a1 in cmset or a2 in cmset) or (is_laa(a1) and is_laa(a2))
         if c['kind'].startswith('data') and c.get('protected'):
@@ -291,27 +218,17 @@ if __name__ == "__main__":
 
 
 def build_directed_probe(src_mac, dst_mac, seq=0, duration=0x013a):
-    """The DIRECTED probe request a console sends once it has chosen a peer.
-
-    Not the same frame as the broadcast StreetPass probe: the SSID is a zero-length wildcard,
-    there is NO Nintendo vendor IE, and addr3 (BSSID) is the PEER's MAC rather than broadcast.
-    Taken byte-for-byte from frames_1788125397.pcap #2760 (documentation addresses substituted),
-    which the console retried 5 times -- so it is also the frame most likely to draw a hardware ACK.
-    """
+    """The DIRECTED probe request a console sends once it has chosen a peer."""
     hdr = (b'\x40\x00' + struct.pack('<H', duration) + bytes(dst_mac) + bytes(src_mac)
            + bytes(dst_mac) + struct.pack('<H', (seq & 0xFFF) << 4))
-    ies  = b'\x00\x00'                                       # wildcard SSID, length 0
+    ies  = b'\x00\x00'
     ies += b'\x01\x08' + bytes.fromhex('82848b0c12961824')   # rates 1,2,5.5,6,9,11,12,18
     ies += b'\x32\x04' + bytes.fromhex('3048606c')           # ext   24,36,48,54
     return hdr + ies
 
 
 def build_action(src_mac, dst_mac, seq=0, duration=0x00d5, tail=b'\x00\x00'):
-    """The Nintendo vendor-specific action frame (category 0x7f + OUI 00:1f:32 + 2 bytes).
-
-    Byte-for-byte from frames_1788125397.pcap #2756. Body is only 6 bytes -- a signal, not a
-    carrier. addr3 (BSSID) is the peer's MAC.
-    """
+    """The Nintendo vendor-specific action frame (category 0x7f + OUI 00:1f:32 + 2 bytes)."""
     hdr = (b'\xd0\x00' + struct.pack('<H', duration) + bytes(dst_mac) + bytes(src_mac)
            + bytes(dst_mac) + struct.pack('<H', (seq & 0xFFF) << 4))
     return hdr + b'\x7f' + NIN_OUI + bytes(tail)

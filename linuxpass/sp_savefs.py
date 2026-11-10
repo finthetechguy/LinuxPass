@@ -1,42 +1,5 @@
 #!/usr/bin/env python3
-"""
-Reader for the 3DS "SAVE" inner filesystem (the inner FAT of a DISA container).
-
-WHY. Carving a save image for CEC messages by magic finds only the ones stored contiguously: of the
-7 Mii Plaza containers carved out of a real 28 MB CEC partition, **only 1 had a valid HMAC** -- the
-other 6 were fragmented across non-adjacent blocks. Reading the filesystem properly fixes that and
-also recovers the real paths, which is what tells inbox from outbox and names the title.
-
-FORMAT, derived from the image and validated against known-good data:
-
-  SAVE header
-    +0x00  "SAVE"            +0x08 u64 fs-info offset      +0x18 u32 image block size
-    +0x04  u32 0x00040000    +0x10 u64 image size (blocks)
-
-  filesystem info (at the fs-info offset)
-    +0x04 u32 data region block size     +0x28 u64 FAT offset       +0x38 u64 data region offset
-    +0x08 u64 dir hash table offset      +0x30 u32 FAT entry count  +0x40 u32 data region blocks
-    +0x18 u64 file hash table offset
-    +0x48/+0x58  directory / file entry table. In the DUPLICATE_DATA layout these live inside the
-                 data region and the low u32 is a data-region BLOCK index (0 and 1 here).
-
-  directory entry, 0x28 bytes:  +0x00 u32 parent, +0x04 char name[16]
-  file entry,      0x30 bytes:  +0x00 u32 parent, +0x04 char name[16],
-                                +0x1C u32 first block, +0x20 u64 size
-  Entry 0 of each table is a header, not an entry.
-
-  FAT: 8 bytes per node, **node index = data block index + 1**.
-    u: bit31 = start-of-chain, low31 = previous node
-    v: bit31 = this node heads a multi-block run, low31 = next node (0 = end)
-    when v's bit31 is set, fat[node+1] = {run start, run end} (inclusive, in node indices)
-
-VALIDATED three independent ways in `--selftest`:
-  * `eventlog.dat` reads as exactly 200020 bytes over 49 blocks -- and 200020 is the size of the
-    same file in an unrelated emulator NAND;
-  * `MBoxList____` reads as 396 bytes starting with the `hh` magic;
-  * a Mii Plaza OutBox message reassembled from a fragmented 8-block chain **verifies its
-    HMAC-SHA256** -- a 1-in-2^256 oracle that the chain walk is right.
-"""
+"""Reader for the 3DS "SAVE" inner filesystem (the inner FAT of a DISA container)."""
 import struct
 
 SAVE_MAGIC = b'SAVE'
@@ -60,7 +23,6 @@ class SaveFS:
         self.file_tab = self.data_off + struct.unpack_from('<I', data, fi + 0x58)[0] * self.block_size
         self.max_files = struct.unpack_from('<I', data, fi + 0x60)[0]
 
-    # ---- raw tables ----
     def _fat(self, node):
         return struct.unpack_from('<II', self.d, self.fat_off + node * 8)
 
@@ -76,7 +38,6 @@ class SaveFS:
                 'block': struct.unpack_from('<I', self.d, o + 0x1C)[0],
                 'size': struct.unpack_from('<Q', self.d, o + 0x20)[0]}
 
-    # ---- block chains ----
     def chain(self, first_block, limit=None):
         """Data-region block indices for a file, following the FAT. Node = block + 1."""
         limit = limit or self.data_blocks + 2
@@ -87,7 +48,7 @@ class SaveFS:
             seen.add(node)
             _u, v = self._fat(node)
             nxt = v & 0x7FFFFFFF
-            if v & 0x80000000:                      # multi-block run
+            if v & 0x80000000:
                 _su, sv = self._fat(node + 1)
                 end = sv & 0x7FFFFFFF
                 if not (node <= end <= self.fat_count):
@@ -109,7 +70,6 @@ class SaveFS:
             raise ValueError('short read for %r' % entry['name'])
         return bytes(out[:entry['size']])
 
-    # ---- tree ----
     def path_of_dir(self, i, _depth=0):
         parts = []
         while i and _depth < 32:
@@ -175,7 +135,6 @@ def _selftest():
         chk('it is 396 bytes and starts with the hh magic',
             len(d) == 396 and d[:2] == b'hh', '%d %r' % (len(d), d[:2]))
 
-    # the decisive one: a fragmented Plaza message must verify its HMAC
     import sp_cec, sp_build
     plaza = [f for p, f in files.items()
              if p.startswith('CEC/00020800/') and f['name'].startswith('_')]

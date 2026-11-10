@@ -1,30 +1,11 @@
 #!/usr/bin/env python3
-"""A CEC message store on disk, shaped like a console's.
-
-`sp_cecstore.py` READS a console's store out of a save image; this WRITES one. A relay needs both
-halves: everything harvested from a save dump or off the air goes in here, and everything served to
-a console comes back out.
-
-The layout is the console's own, so the same reader parses it and it stays inspectable:
-
-    CEC/MBoxList____                     0x6868, version at +4, COUNT at +8, 24 x 16-byte entries
-    CEC/<title>/MBoxInfo____             'cc', title id at +4, the 32-byte HMAC key at +0x10
-    CEC/<title>/MBoxData.010             the display name, UTF-16LE
-    CEC/<title>/<box>/BoxInfo_____       'bb', capacity and usage counters
-    CEC/<title>/<box>/_<name>            one message; <name> is base64(message id), '/'->'-',
-                                         unpadded -- verified on all 15 of the XL's messages
-
-Title directories are lower-case hex, which is what the console writes (`00030b00`, not `00030B00`)
-for anything with a hex letter in it.
-"""
+"""A CEC message store on disk, shaped like a console's."""
 import os, json, time, struct, base64, hashlib, hmac as _hmac
 
 import sp_cec
 
 MBOXLIST_MAGIC, MBOXINFO_MAGIC, BOXINFO_MAGIC = 0x6868, 0x6363, 0x6262
-#: A sidecar beside the console-shaped tree, holding the two facts a console has no field for:
-#: where each message came from, and which titles we hold a REAL key for. It is deliberately
-#: outside `CEC/` so the tree stays byte-comparable with a console's own.
+# Kept outside CEC/ so the tree stays byte-comparable with a console's.
 META_FILE = 'store_meta.json'
 MBOXLIST_HDR, MBOXLIST_ENTRY, MBOXLIST_MAX = 12, 16, 24
 BOXES = {'inbox': 'InBox___', 'outbox': 'OutBox__'}
@@ -32,7 +13,7 @@ DEFAULT_MAX_BYTES, DEFAULT_MAX_MESSAGES = 0x100000, 24
 
 
 def message_filename(container):
-    """`_` + base64 of the 8-byte message id, '/' -> '-', unpadded. [P] 15/15 on the XL's store."""
+    """`_` + base64 of the 8-byte message id, '/' -> '-', unpadded."""
     mid = container[0x20:0x28]
     return '_' + base64.b64encode(mid).decode().rstrip('=').replace('/', '-')
 
@@ -47,13 +28,8 @@ class Store:
         if not os.path.exists(self._mboxlist_path()):
             self._write_mboxlist([])
         if not os.path.exists(self._meta_path()):
-            # Migration: a store written before the sidecar existed had every title's key taken
-            # from a real source, so seed it as keyed. Only titles registered from here on can be
-            # marked keyless, which is what keeps `verify()` from calling an unknown key a
-            # FAILURE rather than an unknown.
             self._save_meta({'keyed_titles': ['%08x' % t for t in self.titles()], 'origins': {}})
 
-    # -- the sidecar -----------------------------------------------------------------------
     def _meta_path(self):
         return os.path.join(self.root, META_FILE)
 
@@ -64,9 +40,6 @@ class Store:
             m = {}
         m.setdefault('keyed_titles', [])
         m.setdefault('origins', {})
-        # Origins were briefly keyed by message id alone. Re-key them by box, using the box each
-        # record already carries -- otherwise the change silently hides every existing record
-        # rather than migrating it, which is the same audit-trail loss it was made to prevent.
         legacy = [k for k in m['origins'] if '/' not in k]
         if legacy:
             for k in legacy:
@@ -86,20 +59,7 @@ class Store:
         return '%s/%s' % (box, mid.hex() if isinstance(mid, (bytes, bytearray)) else mid)
 
     def origin(self, container_or_id, box='outbox'):
-        """-> {'source', 'when', 'box'} for one message IN ONE BOX, or None if never recorded.
-
-        `source` is free text with a meaningful prefix: `air:<mac>` for something a console handed
-        us over the radio, otherwise the path it was imported from. The relay refuses to SERVE
-        anything whose outbox origin is `air:` -- see `sp_relay.select_for_peer`.
-
-        Keyed by BOX as well as by id, and that is not fussiness. The same message can legitimately
-        exist twice: a console hands us its Mii Plaza message over the air (inbox, `air:`), and the
-        operator later imports a dump of that same console (outbox, the dump path). Keying on the
-        id alone let the second write erase the first, so a store would forget that anything had
-        ever arrived over the radio -- the audit trail quietly laundering itself. Measured on the
-        real store: importing the 2DS's dump silently cleared the `air:` tag on 3 of the 4
-        messages it had sent us that evening.
-        """
+        """-> {'source', 'when', 'box'} for one message IN ONE BOX, or None if never recorded."""
         mid = (container_or_id[0x20:0x28] if len(container_or_id) > 0x28 else container_or_id)
         m = self._load_meta()['origins']
         return m.get(self._okey(mid, box))
@@ -111,7 +71,6 @@ class Store:
         o = self.origin(container_or_id, box)
         return bool(o) and str(o.get('source', '')).startswith('air:')
 
-    # -- paths -----------------------------------------------------------------------------
     def _mboxlist_path(self):
         return os.path.join(self.cec, 'MBoxList____')
 
@@ -121,7 +80,6 @@ class Store:
     def _box_dir(self, tid, box):
         return os.path.join(self._title_dir(tid), BOXES[box])
 
-    # -- MBoxList --------------------------------------------------------------------------
     def _write_mboxlist(self, titles):
         if len(titles) > MBOXLIST_MAX:
             raise ValueError('a store holds at most %d titles, got %d'
@@ -145,7 +103,6 @@ class Store:
                 pass
         return out
 
-    # -- titles ----------------------------------------------------------------------------
     def add_title(self, tid, name=None, hmac_key=None):
         """Register a title. Idempotent; a later call may fill in a name or key."""
         for box in BOXES:
@@ -176,19 +133,7 @@ class Store:
         return tid
 
     def title_key(self, tid):
-        """The title's 32-byte HMAC key, or None if we have no MBoxInfo for it.
-
-        An ALL-ZERO key is a real key, not an absent one: nintendogs + cats ships 32 zero bytes in
-        its `MBoxInfo____` and its message's trailer verifies under them. Treating all-zero as
-        "missing" silently drops a working key and turns a verifiable message into an
-        unverifiable one.
-
-        The converse is also a trap, and it is why the sidecar exists. A title first seen when a
-        console sent us a message has no key at all, and `add_title` still writes an `MBoxInfo____`
-        (the store needs one) whose key field is zero -- indistinguishable on disk from
-        nintendogs' genuine all-zero key. `verify()` would then report FALSE, i.e. "this message
-        is forged", for a message that is merely unverifiable. So a key counts as real only if a
-        source actually supplied one."""
+        """The title's 32-byte HMAC key, or None if we have no MBoxInfo for it."""
         p = os.path.join(self._title_dir(tid), 'MBoxInfo____')
         if not os.path.exists(p):
             return None
@@ -203,7 +148,6 @@ class Store:
             return None
         return sp_cec.decode_utf16_name(open(p, 'rb').read())
 
-    # -- messages --------------------------------------------------------------------------
     def _write_boxinfo(self, tid, box):
         msgs = self.messages(tid, box)
         used = sum(len(c) for _t, _b, c in msgs)
@@ -213,11 +157,7 @@ class Store:
         open(os.path.join(self._box_dir(tid, box), 'BoxInfo_____'), 'wb').write(bytes(b))
 
     def add_message(self, container, box='inbox', name=None, key=None, origin=None):
-        """File one bare 0x6060 container. -> its path. Replaces a message with the same id.
-
-        `origin` records WHERE this message came from -- `air:<mac>` for one a console handed us,
-        otherwise the path it was imported from. The relay will not serve anything marked `air:`.
-        """
+        """File one bare 0x6060 container."""
         if container[:2] != b'\x60\x60':
             raise ValueError('add_message takes a bare 0x6060 container; unwrap the envelope first')
         h = sp_cec.parse_header(container)
@@ -266,11 +206,7 @@ class Store:
         return False
 
     def remove_title(self, tid):
-        """Forget a title entirely: its messages, its name, its key, its MBoxList entry.
-
-        -> how many messages went with it. This is destructive and irreversible -- the HMAC key
-        goes too, and the only other copy of that is the console dump it came from.
-        """
+        """Forget a title entirely: its messages, its name, its key, its MBoxList entry."""
         import shutil
         n = 0
         for box in BOXES:
@@ -288,11 +224,7 @@ class Store:
         return n
 
     def clear_box(self, box):
-        """Empty one box across every title. -> how many messages were removed.
-
-        This is what makes "swap the data the relay is holding" a single step: clear the outbox,
-        import the replacement. Without it an import ADDS to whatever was there, and the relay
-        would keep serving the previous console's messages alongside the new ones."""
+        """Empty one box across every title."""
         n = 0
         for t, b, c in self.messages(box=box):
             if self.remove_message(t, b, c):
@@ -368,14 +300,12 @@ def _selftest():
             sorted(s.titles()) == sorted(t for t in meta if meta[t]['inbox'] or meta[t]['outbox']),
             len(s.titles()))
 
-        # the reader must accept what the writer produced
         found = sp_cecstore.scan_tree(tmp)
         chk('sp_cecstore reads the store back', len(found) == n, len(found))
         chk('MBoxList round-trips through the reader',
             sorted(sp_cecstore.parse_mboxlist(open(s._mboxlist_path(), 'rb').read())['titles'])
             == sorted(s.titles()))
 
-        # content and keys survive
         bad = [(t, b) for t, b, c in s.messages() if s.verify(t, c) is False]
         chk('every stored message still verifies its HMAC', not bad, bad)
         chk('every title has its 32-byte key, all-zero ones included',
@@ -387,9 +317,6 @@ def _selftest():
             all(s.verify(t, c) for t, _b, c in s.messages(0x00030B00)))
         chk('so did the names', s.title_name(0x00020800) == 'StreetPass Mii Plaza',
             s.title_name(0x00020800))
-        # An ODD-length name file is real: the 2DS's Super Mario Maker MBoxData.010 is 35 bytes.
-        # Decoding that with errors='replace' appends U+FFFD, and writing the decoded string back
-        # made the corruption permanent.
         s_odd = Store(os.path.join(tmp, 'oddname'))
         s_odd.add_title(0x001A0400, name=sp_cec.decode_utf16_name(
             'Super Mario Maker'.encode('utf-16-le') + b'\x00'))
@@ -399,7 +326,6 @@ def _selftest():
         chk('and the name survives a rewrite unchanged',
             '\ufffd' not in (s_odd.title_name(0x001A0400) or ''))
 
-        # filenames are the console's own
         orig = {p.split('/')[-1] for p in files if '/OutBox__/_' in p or '/InBox___/_' in p}
         ours = set()
         for t in s.titles():
@@ -409,7 +335,6 @@ def _selftest():
         chk('filenames are byte-identical to the console\'s', ours == orig,
             sorted(ours ^ orig)[:4])
 
-        # idempotence and removal
         c0 = s.messages(0x00030600, 'outbox')[0][2]
         s.add_message(c0, 'outbox')
         chk('re-filing the same message does not duplicate it',
@@ -426,7 +351,6 @@ def _selftest():
         chk('more than 24 titles is refused',
             _raises(lambda: s._write_mboxlist(list(range(25)))))
 
-        # -- provenance: where a message came from, recorded because no CEC field carries it --
         s2 = Store(os.path.join(tmp, 'prov'))
         plaza = [c for _t, _b, c in s.messages(0x00020800)][0]
         s2.add_message(plaza, 'inbox', key=meta[0x00020800]['hmac_key'],
@@ -436,14 +360,12 @@ def _selftest():
         chk('and an air-sourced message is recognisable as one', s2.is_from_air(plaza, 'inbox'))
         chk('provenance survives reopening the store',
             Store(os.path.join(tmp, 'prov')).is_from_air(plaza, 'inbox'))
-        mk7c = [c for _t, _b, c in s.messages(0x0008C500)][0]   # MK7's was removed just above
+        mk7c = [c for _t, _b, c in s.messages(0x0008C500)][0]
         s2.add_message(mk7c, 'outbox', key=meta[0x0008C500]['hmac_key'],
                        origin='console_nand')
         chk('an imported message is NOT air-sourced', not s2.is_from_air(mk7c))
         chk('a message with no recorded origin reports None',
             Store(os.path.join(tmp, 'noprov')).origin(plaza, 'inbox') is None)
-        # the same message in two boxes keeps TWO origins: re-importing must not launder the
-        # record that a console once handed it to us over the air
         s2.add_message(plaza, 'outbox', origin='/operator/dump.bin')
         chk('importing a copy does NOT erase the air record on the other box',
             s2.is_from_air(plaza, 'inbox') and not s2.is_from_air(plaza, 'outbox'),
@@ -453,9 +375,8 @@ def _selftest():
         chk('and leaves the other box\'s record intact',
             s2.origin(plaza, 'outbox')['source'] == '/operator/dump.bin')
 
-        # -- an UNKNOWN key must read back as unknown, not as 32 zero bytes ------------------
         s3 = Store(os.path.join(tmp, 'nokey'))
-        s3.add_message(plaza, 'inbox')                       # no key supplied: a fresh title
+        s3.add_message(plaza, 'inbox')
         chk('a title we were never given a key for reports no key',
             s3.title_key(0x00020800) is None, s3.title_key(0x00020800))
         chk('and its message verifies as UNKNOWN, not as forged',
@@ -468,12 +389,11 @@ def _selftest():
             s.title_key(0x00030B00) == b'\x00' * 0x20)
         s4 = Store(os.path.join(tmp, 'migrate'))
         s4.add_message(plaza, 'outbox', key=meta[0x00020800]['hmac_key'])
-        os.remove(s4._meta_path())                           # a store written before the sidecar
+        os.remove(s4._meta_path())
         chk('a pre-sidecar store keeps its keys when reopened',
             Store(os.path.join(tmp, 'migrate')).title_key(0x00020800)
             == meta[0x00020800]['hmac_key'])
 
-        # -- removing a title outright --------------------------------------------------------
         s6 = Store(os.path.join(tmp, 'rmtitle'))
         for t, b, c in s.messages():
             s6.add_message(c, b, key=meta.get(t, {}).get('hmac_key'))
@@ -494,8 +414,6 @@ def _selftest():
         chk('and their messages', len(s6.messages(other)) == len(s.messages(other)))
         chk('removing a title that is not there is not an error', s6.remove_title(0x00999900) == 0)
 
-        # -- clearing a box, which is how the relay's data gets swapped ----------------------
-        # a sidecar written with the id-only keys must migrate, not vanish
         sm = Store(os.path.join(tmp, 'legacy'))
         sm.add_message(plaza, 'inbox', origin='air:11:22:33:44:55:66')
         raw = json.load(open(sm._meta_path()))

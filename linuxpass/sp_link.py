@@ -1,56 +1,5 @@
 #!/usr/bin/env python3
-"""
-STAGE 2 -- drive the StreetPass handshake to an encrypted link and decrypt what the console sends.
-
-Stage 1 proved a real 3DS will answer a probe we synthesised: it sent us directed probe responses
-carrying its 12 services and its session token. This goes the next step -- reply, complete the
-handshake, derive the CCMP key, and decrypt a frame the console encrypts to us.
-
-THE SEQUENCE, reconstructed from two captures and verified by decryption
------------------------------------------------------------------------
-There is NO 802.11 Authentication and NO Association. The console goes from probe response straight
-to CCMP-protected data. Assembled from frames_1788125397.pcap (where we see the peer's side) and
-spectral_attempt1/frames_1788198923.pcap (where we see the console's side and the timings):
-
-    us  -> broadcast StreetPass probe (our token, our services)
-    <-  directed StreetPass PROBE RESPONSE   (its token, 12 services, DS=ch11)   [Stage 1 got here]
-    ->  ACTION frame, category 0x7f + OUI 00:1f:32          x2      ~ +0.5 ms
-    ->  directed PROBE REQUEST (wildcard SSID, no vendor IE)        ~ +144 ms
-    <-  PROBE RESPONSE #2 -- the LINK BSS: capability 0x0012 (IBSS|PRIVACY), hidden SSID,
-        WMM + Atheros(00:03:7f) IEs                                 ~ +167 ms
-    ->  CCMP-encrypted YY SYN, PN=1                                 ~ +289 ms
-    <-  CCMP-encrypted YY SYN|ACK, PN=1        <-- STAGE 2 SUCCESS  ~ +291 ms
-
-THE KEY
--------
-    key = AES_ECB(normalkey_0x2E, HMAC_SHA1(k17, tok_host|tok_client|mac_host|mac_client)[:16])
-
-`host` is the BSSID owner, which is the console that sends the probe response -- the role the 2DS XL
-played in Stage 1, so we are the client. That ordering reproduces BOTH decrypted sessions
-(sweep_new 108/108 and spectral_attempt1 2/2). The rule is inferred from two sessions in which the
-same console was host, so this tool derives BOTH orderings and tries both on every received frame;
-which one works is reported. Transmission uses the host-first ordering first.
-
-WHY PLAIN MONITOR MODE, AND NOT `flags active`
-----------------------------------------------
-An 802.11 ACK must come from silicon (SIFS ~10 us), so the obvious idea is active monitor, which
-makes the hardware ACK frames addressed to the interface. On this box that is a KERNEL OOPS:
-
-    ip link set mon0 up  ->  ieee80211_open -> drv_add_interface -> ath9k_add_interface
-                         ->  ath_tx_node_init+0x41 [ath9k]: NULL deref at 0x66
-
-and because the oops happened inside an rtnetlink handler it left `rtnl_lock` held forever, wedging
-all of userspace. Verified from the crash log, kernel 7.1.11-arch1, QCA9565. DO NOT re-enable it.
-
-It is very likely unnecessary anyway. In the Stage 1 log the console's five probe responses arrived
-15 s apart, not milliseconds apart -- those are five independent engagement attempts, not MAC-layer
-retries. The console was not waiting for an ACK; it was waiting for a REPLY that never came. So this
-tool changes nothing about the radio's configuration and simply answers.
-
-    ./sp_link.py --selftest                 # no hardware, no root
-    ./sp_link.py --replay <pcap>            # run the decoder over a capture
-    sudo ./linuxpass-link wlp3s0 11             # the real run
-"""
+"""Stage 2: drive the handshake to an encrypted link and decrypt what the console sends."""
 import sys, os, time, socket, struct, select, random, argparse, inspect
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -64,15 +13,8 @@ WINDOW = 0x38B8                      # 14520, what both consoles advertise
 DATA_DURATION = 0x002C               # 44 us -- the value on all 108 captured bulk frames
 
 
-# ---------------------------------------------------------------------------------------------
-# builders
-
 def build_yy(flags, seq=0, ack=0, window=WINDOW, payload=b''):
-    """One YY segment as it appears INSIDE the CCMP payload (LLC/SNAP + 2 pad + 24-byte header).
-
-    Verified: build_yy(0x12) reproduces the decrypted plaintext of spectral_attempt1 #73 exactly.
-    `length` counts from the 802.3 frame start, which is 0x18 before the YY header, hence 0x30.
-    """
+    """One YY segment as it appears INSIDE the CCMP payload (LLC/SNAP + 2 pad + 24-byte header)."""
     yy = (struct.pack('<HHHH', 0x5959, 0x30 + len(payload), 0xDEAD, 0xBEAF)
           + struct.pack('<II', seq, ack)
           + bytes([12, flags]) + struct.pack('<H', window) + b'\x00\x00\x00\x00')
@@ -80,26 +22,18 @@ def build_yy(flags, seq=0, ack=0, window=WINDOW, payload=b''):
 
 
 def ccmp_header(pn):
-    """8-byte CCMP header for packet number `pn`. Layout: PN0 PN1 rsvd KeyID|ExtIV PN2 PN3 PN4 PN5.
-    Verified against captured frames: pn=1 -> 0100002000000000, pn=2 -> 0200002000000000."""
+    """8-byte CCMP header for packet number `pn`."""
     p = pn.to_bytes(6, 'big')                    # PN5..PN0
     return bytes([p[5], p[4], 0x00, 0x20, p[3], p[2], p[1], p[0]])
 
 
 def build_encrypted_data(key, src, dst, bssid, pn, plaintext, seq=0, duration=DATA_DURATION):
-    """A CCMP-protected 802.11 data frame, ready to inject.
-
-    toDS=0/fromDS=0 (IBSS addressing) and addr3 = BSSID = the HOST console's MAC -- confirmed
-    identical in both directions across all 108 captured bulk frames.
-    """
+    """A CCMP-protected 802.11 data frame, ready to inject."""
     hdr = (b'\x08\x40' + struct.pack('<H', duration)
            + bytes(dst) + bytes(src) + bytes(bssid)
            + struct.pack('<H', (seq & 0xFFF) << 4))
     return sp_ccmp.encrypt(key, hdr + ccmp_header(pn), plaintext)
 
-
-# ---------------------------------------------------------------------------------------------
-# pcap writer -- everything we hear AND everything we send, for offline post-mortem
 
 class Pcap:
     def __init__(self, path):
@@ -119,10 +53,7 @@ class Pcap:
             pass
 
 
-# ---------------------------------------------------------------------------------------------
-
 class Link:
-    # handshake states, in order
     IDLE, ENGAGED, REPLIED, LINKBSS, SYNSENT, DONE = range(6)
     STATE_NAME = {0: 'IDLE', 1: 'ENGAGED', 2: 'REPLIED', 3: 'LINKBSS', 4: 'SYNSENT', 5: 'DONE'}
 
@@ -140,68 +71,38 @@ class Link:
         self.state = self.IDLE
         self.max_state = self.IDLE
         self.attempts = 0
-        self.peer = None            # console MAC (bytes)
+        self.peer = None
         self.peer_token = None
         self.keys = []              # [(label, key)]
         self.events = []
         self.rx_total = self.echoes = 0
         self.sent = {}
-        self.sent_frames = []          # (what, mpdu) -- lets tests verify what we put on air
+        self.sent_frames = []
         self.decrypted = []
         self.protected_seen = 0
         self.t_engaged = None
         self.pending_poll = None
         self.linkbss_deadline = None
         self.log_lines = []
-        # Console PRESENCE, tracked separately from engagement. Without this a silent run cannot
-        # distinguish "the console ignored us" from "no console was transmitting at all" -- and
-        # those need completely different fixes.
-        self.session = None          # the Stage 3 YY object exchange, once the link is up
+        self.session = None
         if getattr(a, 'forward', None):
-            # TITLE-AGNOSTIC FORWARD: send CEC messages dumped from any title's OutBox, verbatim.
-            # Nothing below the body is title-specific -- the probe/0x11 declaration, the ee records
-            # and the 0x81 list all take the title id from each message's own container header, and a
-            # dumped message already carries a valid HMAC trailer, so no per-title key is needed.
-            #
-            # MULTI-TITLE: pass more than one file and they all go in ONE encounter, which is what a
-            # real console does. Each gets its own ee entry and its own 0x81 slot, and the messages
-            # follow the control objects in the order the 0x81 declares them.
             import sp_build
             paths = a.forward if isinstance(a.forward, list) else [a.forward]
             wires, tids = [], []
             for path in paths:
                 w = sp_build.as_wire(open(path, 'rb').read())
                 if not getattr(a, 'keep_msgid', False):
-                    # A message harvested from a console's own boxes is one it ALREADY HAS --
-                    # forwarding it back unchanged is a duplicate and cecd discards it silently: the
-                    # exchange completes 9/9 but there is no green LED. Observed 1 Sep 2026. The id
-                    # is outside the HMAC (which covers the body only), so this is safe for any title.
+                    # cecd discards a message it already has, so a dumped one needs a new id.
                     old_id = w[0x14 + 0x20:0x14 + 0x28].hex()
                     w = sp_build.set_message_id(w)
                     self.log('    fresh message id: %s -> %s (%s)'
                              % (old_id, w[0x14 + 0x20:0x14 + 0x28].hex(), os.path.basename(path)))
                 wires.append(w)
                 tids.append(sp_build.message_title(w))
-            # The ee list's SEND MODE (entry +0x04) must be each message's own header +0x35. cecd
-            # builds its own list that way (0x10BCA6) and gates the store on it (0x1031D0): if the
-            # SENDER declares a non-zero mode the message is taken outright, otherwise the receiver
-            # demands that its OWN entry for that title also be mode 0 AND that it has already sent
-            # its own message. Mii Plaza is mode 0; almost every other title is mode 3, so the old
-            # hardcoded 0 lost on both branches -- MK7 completed 9/9 and was discarded. In a
-            # multi-title list the modes differ BETWEEN entries, so this is per-message. The console
-            # reports its verdict back per entry in the 0x34: +0x06 is 1 (accepted) or 2 (refused).
-            # See EE_SEND_MODE.md.
             sm = getattr(a, 'send_mode', None)
             self.outbox = sp_build.build_outbox(wires, send_mode=sm)
-            # The service record's FLAG byte is per-title and it matters: the console's own probe
-            # advertises 0x30 for most titles, 0x10 for a couple, 0x32 (with a 6-byte trailer) for
-            # 0x00020500, and 0x00 ONLY for Mii Plaza. Declaring Plaza's 0x00 for a non-Plaza title
-            # made the console offer an ee record with ZERO entries, so the count-equality gate at
-            # cecd 0x1148C0 failed and the exchange stalled after object 5. Use its own values.
+            # The service flag is per-title. Plaza's 0x00 on another title stalls the exchange.
             known = {t: (f, tr) for t, f, tr in T.SERVICES_FULL}
-            # A title is declared ONCE however many messages we carry for it -- a title with two
-            # queued messages travels as one object and gets one ee entry (see sp_build.envelope).
-            # Declaring it twice would put two entries in the 0x11 and misstate the offer.
             uniq = list(dict.fromkeys(tids))
             self.services = [(t,) + known.get(t, (0x30, b'')) for t in uniq]
             self.log('  FORWARD %d message(s) across %d title(s) in one encounter'
@@ -222,9 +123,7 @@ class Link:
                              (h['total_size'], h['header_size'], h['body_size']))
                 except Exception as e:
                     self.log('        (container header did not parse: %s)' % e)
-            # With more than one entry the 0x33 MUST be in the console's own order: cecd 0x1148C0
-            # walks the two lists in parallel and rejects the pair the moment A[i].title differs
-            # from B[i].title. We cannot know its order in advance, so mirror its 0x32.
+            # With several entries the 0x33 must follow the console's order, so mirror its 0x32.
             if len(uniq) > 1 and not a.mirror_offer:
                 a.mirror_offer = True
                 self.log('    multi-title: --mirror-offer enabled automatically, so our 0x33 is in '
@@ -274,7 +173,6 @@ class Link:
                 raise ValueError('built Mii fails the plaza gate: %s' % why)
         else:
             self.outbox = load_objects(a.objects, self.log) if a.objects else []
-        # --from-scratch already applied the name/author/identity, so don't unwrap and re-wrap it.
         if (not getattr(a, 'from_scratch', False)) and self.outbox and len(self.outbox) >= 6 and (
                 a.fresh_mii or a.mii_name or a.author_name):
             self.outbox[5] = edit_mii(self.outbox[5], mii_name=a.mii_name,
@@ -298,33 +196,21 @@ class Link:
         if self.outbox and (a.fresh_msgid or a.fresh_consoleid):
             self.outbox = freshen_identity(self.outbox, self.log,
                                            msgid=a.fresh_msgid, consoleid=a.fresh_consoleid)
-        #: optional hook(link, peer_mac, peer_services) -> (services, outbox) or None, called the
-        #: moment a console engages us, so a caller can choose what to send based on what that
-        #: console declares. See sp_relay.
+        # hook(link, peer_mac, peer_services) -> (services, outbox) or None.
         self.peer_hook = None
-        #: set by the peer hook when it decides to serve this console nothing, so `verdict()`
-        #: can say so. Without it a deliberate decline is indistinguishable from a console fault.
         self.declined = None
-        #: Called on every turn of the run loop. The relay uses it as a liveness signal: if the
-        #: radio wedges this stops, and the systemd watchdog restarts the SERVICE. Never a reboot.
+        # Liveness signal: if the radio wedges this stops, and the watchdog restarts the service.
         self.tick_hook = None
         self.sightings = {}          # mac -> {'n','first','last','token','rssi'}
-        #: Every frame from a console OUI that was NOT a StreetPass probe request, so the verdict
-        #: can tell "no console was there" from "a console was on air and would not talk to us".
-        #: A console whose MacFilter is refusing this MAC emits no StreetPass probe at all, so
-        #: `sightings` stays empty and the two cases were previously indistinguishable -- which is
-        #: exactly what made the 7 Sep 2026 evening unreadable. mac -> {'n','first','last'}.
+        # A console refusing our MAC sends no probe, so this separates refused from absent.
         self.on_air = {}
         self.last_heartbeat = 0.0
-        # The console hops 1/6/11 and its presence is intermittent, so sitting on one channel
-        # mostly misses it. Hunt while IDLE; lock to the channel it is actually on the moment we
-        # hear it, because the handshake that follows must not change channel underneath itself.
+        # Hunt while idle, then lock to the console's channel for the handshake.
         self.channels = [int(c) for c in str(a.channel).split(',') if c.strip()]
         self.chan_idx = 0
         self.chan_locked = False
         self.next_hop = 0.0
 
-    # -- logging ---------------------------------------------------------------------------
     def log(self, msg, level=1):
         line = '[%8.3f] %s' % (time.time() - self.t0, msg)
         self.log_lines.append(line)
@@ -341,14 +227,11 @@ class Link:
         if s != self.state:
             self.log('  state %s -> %s' % (self.STATE_NAME[self.state], self.STATE_NAME[s]))
             self.state = s
-            # Track the FURTHEST point ever reached, not the current one. The machine returns to
-            # IDLE after each failed attempt, so reporting the final state says "never engaged"
-            # about a run in which the console engaged sixteen times.
+            # Track the furthest state, because the machine returns to IDLE after a failed attempt.
             self.max_state = max(self.max_state, s)
             if s == self.ENGAGED:
                 self.attempts += 1
 
-    # -- socket ----------------------------------------------------------------------------
     def open_socket(self):
         t = T.iface_type(self.a.iface)
         if t != 'monitor':
@@ -387,10 +270,7 @@ class Link:
         self.seq = (self.seq + 1) & 0xFFF
         return self.seq
 
-    # -- keys ------------------------------------------------------------------------------
-    # Both of these are None in normal use, which means "load from the operator's own dump"
-    # (see lp_keys.py). The self-tests set them to throwaway values so the whole state machine
-    # can be exercised on a machine that has no console key material at all.
+    # None means load from the operator's own dump. The self-tests set throwaway values.
     key17 = None                 # cecd's 17-byte HMAC key
     normalkey_2e = None          # keyslot 0x2E's normal key
 
@@ -418,7 +298,6 @@ class Link:
                 continue
         return None, None, None
 
-    # -- the handshake ---------------------------------------------------------------------
     def on_probe_response(self, f, mpdu, inf):
         """The console engaged us. Reply with the action frame, then the directed probe."""
         if self.state >= self.LINKBSS:
@@ -429,11 +308,7 @@ class Link:
         self.log('  *** CONSOLE ENGAGED US: %s' % f['addr2'])
         self.log('      token %s   DS=ch%s   %d services'
                  % (inf.get('token'), inf.get('ds'), len(inf.get('services') or [])))
-        # A relay does not know what to serve until it knows what the peer has: the broadcast
-        # probe has to declare everything we hold (the console intersects it to build its offer),
-        # but from here on we can narrow to the titles this console actually declares, which is
-        # what keeps us from transmitting megabytes it has no box for. Everything after this point
-        # -- our 0x11, 0x31, 0x81 and the messages -- uses the narrowed set.
+        # The broadcast probe declares everything held. From here, narrow to what this console has.
         if self.peer_hook is not None:
             try:
                 picked = self.peer_hook(self, f['addr2'], inf.get('services') or [])
@@ -447,7 +322,6 @@ class Link:
                          % (type(e).__name__, e))
         self.setstate(self.ENGAGED)
         self.derive_keys()
-        # Reply exactly as the captured peer did: 2 action frames, then the directed probe.
         for _ in range(2):
             self.send(sp_parse.build_action(self.src, self.peer, seq=self.next_seq()),
                       rate=11.0, noack=False, what='action cat-0x7f')
@@ -455,13 +329,7 @@ class Link:
         self.setstate(self.REPLIED)
 
     def on_link_bss(self, f, mpdu, inf):
-        """PROBE RESPONSE #2 -- capability PRIVACY set. The console has opened the encrypted BSS.
-
-        MUST be attributed to the console we are already engaged with. Every WPA access point in
-        range emits PRIVACY-flagged probe responses, so matching on the capability bit alone hijacks
-        the state machine: observed on ch1, where a neighbour AP drove us into LINKBSS and the real
-        console's engagement was then ignored because the state had already advanced past it.
-        """
+        """Handle the second probe response, which has PRIVACY set."""
         if self.state < self.ENGAGED or not self.peer:
             return
         if f['addr2'] != T.macstr(self.peer):
@@ -474,22 +342,11 @@ class Link:
         self.setstate(self.LINKBSS)
         self.send_syn()
 
-    #: what the code at ee entry +0x06 means, from cecd. 0x1094F8 writes 1 or 2 into the entries
-    #: of OUR list before echoing it back as the 0x34; 0x107062 writes 3 when the console has sent
-    #: its own message for that title; 0x106FA6 writes 4 when it has finished receiving ours; and
-    #: the store gate 0x1031D0 writes 6 when it refuses to keep what it received.
     EE_CODE = {0: 'no decision', 1: 'ACCEPTED', 2: 'REFUSED', 3: 'sent',
                4: 'received', 6: 'refused at store'}
 
     def log_our_lists(self):
-        """Decode OUR OWN outgoing 0x31/0x33/0x81 the same way we decode the peer's 0x32/0x34.
-
-        Until 3 Sep 2026 this was a blind spot: every list object in the run logs was one the
-        CONSOLE sent us, so half the negotiation was invisible. That matters for the silent-send
-        problem (`cec-silent-send`) -- the console's decision to send nothing is taken after it
-        reads OUR list, and we could not see what we had told it. Cheap to log, and it makes a
-        silent pass diffable against a sending one on both sides of the wire.
-        """
+        """Decode OUR OWN outgoing 0x31/0x33/0x81 the same way we decode the peer's 0x32/0x34."""
         for o in self.outbox:
             if len(o) < 0x10 or o[0:2] != b'cc':
                 continue
@@ -519,13 +376,7 @@ class Link:
                             self.EE_CODE.get(code, '?')))
 
     def on_object_received(self, idx, obj, sess):
-        """Decode the console's list objects: mirror its 0x32 if asked, and report its 0x34 verdict.
-
-        The 0x34 is OUR OWN 0x31 list handed back with a decision written into each entry's +0x06
-        (cecd 0x1094F8). 1 means the console will keep our message for that title; 2 means it will
-        not, and the message is discarded after a 9/9 exchange with no notification. That makes the
-        verdict readable from the log alone, without having to open the game.
-        """
+        """Decode the console's list objects, mirroring its 0x32 if asked."""
         if len(obj) < 0x10 or obj[0:2] != b'cc':
             return
         otype = struct.unpack_from('<I', obj, 4)[0]
@@ -566,9 +417,6 @@ class Link:
         new = reorder_offer_object(sess.outbox[i33], obj[0x10:], self.log)
         if new:
             sess.outbox[i33] = new
-            # Log the 0x33 as REWRITTEN, i.e. what actually goes on the wire. `log_our_lists`
-            # runs at peer-hook time, before this rewrite, so without this the transmitted
-            # version was still invisible -- which is the whole point of the instrumentation.
             ee = new[0x10:]
             if len(ee) >= 0x2C and ee[0:2] == b'ee':
                 cnt = struct.unpack_from('<I', ee, 8)[0]
@@ -589,15 +437,7 @@ class Link:
         pt = sp_yysession.build_yy_frame(flags, seq, ack, payload)
         mpdu = build_encrypted_data(key, self.src, self.peer, self.peer, self.pn, pt,
                                     seq=self.next_seq())
-        # A full segment is 1526 B on the wire. At 1 Mbps that is 12.4 ms of airtime per frame and
-        # ~1.38 s for a four-title exchange -- half the whole exchange, and a large target for a
-        # collision on a channel with active neighbours.
-        #
-        # 11 is chosen, not maximal. Measured on the wire 3 Sep 2026, the console sends its own YY
-        # bulk at **54 Mbps OFDM** (177 of 180 data frames) and its probe response at 11 Mbps, so
-        # it plainly receives far more than this. But the saving is nearly all in the first step:
-        # 1 -> 11 Mbps is 1.23 s, 11 -> 54 only a further 0.12 s, and 11 Mbps CCK is a mandatory
-        # 802.11b rate with much more link margin than OFDM. Raise it only with an A/B.
+        # 11 Mbps saves most of the airtime and keeps CCK link margin.
         ok = self.send(mpdu, rate=self.a.yy_rate, noack=False,
                        what='YY %s' % sp_yy.flagstr(flags).replace('|', '+'))
         self.pn += 1
@@ -615,7 +455,7 @@ class Link:
                                                   on_received=self.on_object_received)
             n = int(getattr(self.a, 'manifest_repeat', 0) or 0)
             if n > 0:
-                # By TYPE, never by index: --full-sequence and multi-title forwards both move it.
+                # By type, never by index, because other modes move it.
                 rt = int(getattr(self.a, 'repeat_type', '0x81'), 0)
                 i81 = object_index(self.outbox, 0x81)
                 islot = object_index(self.outbox, rt)
@@ -623,27 +463,13 @@ class Link:
                 if islot is not None:
                     obj = self.outbox[islot]
                 elif rt == 0xF2:
-                    # THE STATE-INDEPENDENT PROBE. cecd's object handler 0x1073F0 tests for type
-                    # 0xF2 at 0x107424 -- BEFORE it reads the exchange state at 0x10742A -- and
-                    # answers it with set_state(0x10) = SCAN. Every other route through that
-                    # handler is chosen by state (a 0x33 only in 0x20, an 0x81 only in 0x31), and
-                    # the console ignored both on hardware. So a 0xF2 asks the one question those
-                    # could not: is the RX loop 0x105080 still dispatching objects at all? It
-                    # dispatches only while 0x18 <= state < 0x36 and state is neither 0x33 nor
-                    # 0x35, so a reaction bounds the state to that window; silence puts the
-                    # console outside it, or its receive loop is gone.
-                    #
-                    # Nothing reads the body on this path (the memcpy at 0x10741A happens first,
-                    # then the type test short-circuits), so four zero bytes suffice. The header
-                    # must satisfy 0 < [obj+0x0C] <= 0x5DC, checked at 0x107404.
+                    # cecd answers 0xF2 before reading its state, so it can nudge a silent console.
                     obj = cec_object(0xF2, b'\x00' * 4)
                     islot = -1
                 if i81 is None or obj is None:
                     self.log('  --manifest-repeat: no 0x%02X/0x81 in the outbox, nothing to repeat'
                              % rt)
                 else:
-                    # Repeat AFTER the 0x81 -- that is the point in the exchange where a silent
-                    # console has gone quiet -- but repeat whichever object type was asked for.
                     self.session.repeat_slot = i81
                     self.session.repeat_obj = obj
                     self.session.repeat_max = n
@@ -652,8 +478,6 @@ class Link:
                                 if islot < 0 else 'our 0x%02X (object %d)' % (rt, islot), i81))
             self.session.start_send()
         else:
-            # Stage 2 mode: no objects to deliver, so just open the connection and prove the
-            # link by decrypting whatever the console answers.
             self.send_yy(sp_yy.SYN, 0, 0)
         self.setstate(self.SYNSENT)
 
@@ -687,7 +511,7 @@ class Link:
             self.setstate(self.DONE)
 
     def detect_channel(self, secs=2.0):
-        """The channel the radio is REALLY on, from the radiotap Channel field of received frames."""
+        """The channel the radio is really on, from the radiotap of received frames."""
         from collections import Counter
         c, end = Counter(), time.time() + secs
         while time.time() < end:
@@ -709,12 +533,7 @@ class Link:
         return None
 
     def note_on_air(self, mac):
-        """A console-OUI frame that is not a StreetPass probe request.
-
-        Counting only. This is deliberately weaker evidence than a sighting -- the OUI list is a
-        guess about hardware, and the bench box's own identities share `ba:ae:6e` -- so it is
-        reported as "seen on air", never as "a console engaged" or "a console was present".
-        """
+        """A console-OUI frame that is not a StreetPass probe request."""
         now = time.time()
         c = self.on_air.setdefault(mac, {'n': 0, 'first': now})
         c['n'] += 1
@@ -740,8 +559,6 @@ class Link:
                 self.chan_locked = True
                 self.log('  LOCKED to channel %d (the console is here now)'
                          % self.channels[self.chan_idx])
-        # React the way Stage 1 did: a directed probe to a console that just transmitted is the
-        # one moment we KNOW it is on this channel and listening.
         if self.a.reactive and self.state == self.IDLE:
             if time.time() - getattr(self, '_last_react', 0) >= self.a.min_gap:
                 self._last_react = time.time()
@@ -764,9 +581,6 @@ class Link:
             self.log('  ... state=%s  consoles=%d  probes heard=%d  last %.1fs ago'
                      % (self.STATE_NAME[self.state], len(self.sightings), tot, age))
         elif self.on_air:
-            # The live line an operator actually watches during a hand test. "No probes" alone
-            # reads as "nothing is there", which is the wrong conclusion when a console OUI is
-            # plainly transmitting and simply will not talk to us.
             macs = sorted(self.on_air, key=lambda m: -self.on_air[m]['n'])[:2]
             self.log('  ... state=%s  no console probes (%.0fs), but %d frame(s) from %s -- '
                      'something IS on air and not engaging us'
@@ -776,10 +590,8 @@ class Link:
             self.log('  ... state=%s  NO console probes heard yet (%.0fs)'
                      % (self.STATE_NAME[self.state], now - self.t0))
 
-    # -- receive ---------------------------------------------------------------------------
     def pump(self, until):
         while time.time() < until:
-            # deferred directed-probe poll, timed as the real peer did (~144 ms after the action)
             if self.state == self.REPLIED and self.pending_poll \
                     and time.time() >= self.pending_poll:
                 self.pending_poll = None
@@ -788,7 +600,6 @@ class Link:
                                                             seq=self.next_seq()),
                               rate=1.0, noack=False, what='directed probe')
                 self.linkbss_deadline = time.time() + self.a.linkbss_wait
-            # if the link-BSS announcement never comes, send the SYN anyway -- it may be optional
             if self.state == self.REPLIED and self.linkbss_deadline \
                     and time.time() >= self.linkbss_deadline:
                 self.linkbss_deadline = None
@@ -799,11 +610,7 @@ class Link:
             self.heartbeat()
             if self.session:
                 self.session.poll(self.a.yy_idle)
-                # The session can finish inside poll() -- the peer stops opening connections and
-                # we send our remaining objects on our own initiative. DONE was only ever set on
-                # the arrival of a decrypted frame, so a session that ended that way left the run
-                # spinning until its deadline. Harmless for a one-shot run; for the relay it meant
-                # a completed exchange sat unfiled for the rest of the window.
+                # The session can finish inside poll(), with no incoming frame to set DONE.
                 if self.session.done and self.state != self.DONE:
                     self.setstate(self.DONE)
             if (not self.chan_locked and self.state == self.IDLE and len(self.channels) > 1
@@ -813,11 +620,7 @@ class Link:
                 if T.tune(self.a.iface, ch, lambda m, l=2: self.log(m, l)):
                     self.log('  hunting on channel %d' % ch, 2)
                 else:
-                    # An ACTIVE monitor vif takes its chandef at open and `iw set channel` is
-                    # accepted and ignored -- all four forms, re-verified 3 Sep 2026. Retrying
-                    # every `dwell` seconds for the rest of the run produced a log that read as
-                    # though we were hunting 1/6/11 when we had never left the first channel.
-                    # Say it once, then stop pretending.
+                    # An active monitor interface ignores later channel changes.
                     self.chan_locked = True
                     self.channels = [self.channels[0]]
                     self.chan_idx = 0
@@ -846,10 +649,7 @@ class Link:
             if f['addr2'] == me:
                 self.echoes += 1
                 continue
-            # Identify a console by the StreetPass SSID it transmits, NOT by its MAC prefix.
-            # The prefix list is a guess about hardware; the SSID is the protocol. A console that
-            # picks an unexpected OUI would be invisible to a prefix filter, and "no console
-            # heard" is the one verdict we must never report wrongly.
+            # Identify consoles by SSID, because a MAC prefix list is only a guess.
             is_sp_probe = (f['type'] == 0 and f['subtype'] == 4 and T.is_streetpass_probe(mpdu))
             is_console_frame = is_sp_probe or T.is_console(f['addr2'])
             if is_sp_probe:
@@ -877,13 +677,7 @@ class Link:
                              % (f['addr2'], cap), 2)
                 continue
             if f['type'] == 1 and f['subtype'] == 13:
-                # An ACK to our MAC is normally unambiguous -- ACKs carry only addr1, so nothing
-                # but a device that heard us should send one. On a BUSY channel that breaks: a
-                # neighbouring repeater/bridge forwards our frame preserving addr2 and its upstream
-                # AP acknowledges the ORIGINAL transmitter, i.e. us, ~2 ms later. Measured on ch6:
-                # 468 such ACKs for 781 BROADCAST probes, which are never acknowledged. On ch11 the
-                # same broadcast-only phase produced ZERO. So count broadcast-time ACKs as a
-                # BASELINE and treat only the excess during directed transmission as evidence.
+                # A repeater can ACK our frames, so only ACKs above the broadcast baseline count.
                 dt = time.time() - getattr(self, '_last_directed_tx', 0)
                 if dt < 0.001:
                     self.acks_directed = getattr(self, 'acks_directed', 0) + 1
@@ -894,7 +688,6 @@ class Link:
                 continue
             self.log('  %s from %s -> %s' % (f['name'], f['addr2'], f['addr1']), 2)
 
-    # -- run -------------------------------------------------------------------------------
     def run(self):
         self.banner('STAGE 2  --  complete the handshake and decrypt the console')
         self.log('  interface %s  channels %s  our MAC %s'
@@ -906,11 +699,7 @@ class Link:
         if not self.open_socket():
             return 2
         T.tune(self.a.iface, self.channels[0], self.log)
-        # An ACTIVE monitor vif does not report a channel through `iw dev X info`, and its channel
-        # cannot be changed after it comes up: mac80211 assigns the chandef at open, and later
-        # `set channel` is silently ignored (EBUSY while down). So do not trust either the command
-        # or the readback -- measure it, by reading the radiotap Channel field of frames actually
-        # received. That is the only statement about the radio that cannot be wrong.
+        # Read the channel from radiotap, because iw cannot report it for an active monitor.
         actual = self.detect_channel(2.0)
         if actual is None:
             self.log('WARNING: no frames received, cannot confirm the channel. Continuing blind.')
@@ -938,7 +727,6 @@ class Link:
                           rate=1.0, noack=True, what='broadcast probe')
                 nxt = time.time() + self.a.probe_interval
             self.pump(min(deadline, nxt if self.state == self.IDLE else time.time() + 0.2))
-            # if a handshake attempt stalled, fall back to advertising again
             if self.state != self.IDLE and not self.t_engaged:
                 self.log('  in state %s with no engagement in flight -- resetting to IDLE'
                          % self.STATE_NAME[self.state])
@@ -965,11 +753,7 @@ class Link:
         if self.declined:
             self.log('  we offered nothing     : %s  -- this pass ended by OUR choice, not the '
                      "console's" % self.declined)
-        # Two different questions, and conflating them cost a whole evening on 7 Sep 2026.
-        # `sightings` counts StreetPass probe REQUESTS, which neither of our consoles has ever been
-        # observed sending -- they answer our broadcast probe instead. So "NONE" here is the normal
-        # reading even in passes that complete a full exchange, and it is NOT evidence of absence.
-        # `on_air` is the weaker but useful one: any frame at all from a console OUI.
+        # `sightings` counts probe requests, which consoles may never send, so NONE proves nothing.
         if self.sightings:
             for m, c in sorted(self.sightings.items(), key=lambda kv: -kv[1]['n']):
                 self.log('  console probes heard   : %s  %d probes  token=%s  over %.0fs'
@@ -1092,22 +876,7 @@ def sp_cec_header(buf):
 
 
 def freshen_identity(objs, log, msgid=True, consoleid=True):
-    """Make a replayed exchange look like a NEW console sending a NEW message.
-
-    Both fields are outside the HMAC-covered region, so this cannot invalidate the 32-byte trailer:
-
-      * container +0x20, 8 bytes = the CEC message id. The HMAC covers [hdr[0x08], +bodySize),
-        i.e. [0xD28, 0x7FA8), and 0x20 is far below that. It occurs exactly once in the whole
-        33,172-byte exchange.
-      * object 0 (type 0x21) payload, 8 bytes = the sending console's id. Also unique -- it appears
-        in no other object.
-
-    Why: the transport delivers all 32,732 bytes and the console ACKs them, but Mii Plaza shows no
-    new visitor. The console also answers our type-0x31 with an EMPTY message list, which is what a
-    console says when it has nothing new for a peer it already knows. Replaying a real message
-    verbatim means replaying its identity too -- so to Mii Plaza this is a person it has already met
-    carrying a message it has already seen.
-    """
+    """Make a replayed exchange look like a NEW console sending a NEW message."""
     out = list(objs)
     if consoleid and out and len(out[0]) >= 24:
         o = bytearray(out[0])
@@ -1124,11 +893,7 @@ def freshen_identity(objs, log, msgid=True, consoleid=True):
     return out
 
 
-# The three objects that OPEN a real exchange. We had been starting at 0x21, three phases late,
-# which is why the console never had anything to offer -- it had not yet been told what we support.
-# All three read off a decrypted real exchange (exchange1_channel6_mt7902.pcap, green light).
-
-# Identical from BOTH sides in the real capture: a constant capability/version blob.
+# A constant capability blob, identical from both sides in captures.
 OBJ_43_PAYLOAD = bytes.fromhex('1b0010001a800f00ffffffff84541200')
 
 
@@ -1139,13 +904,7 @@ def cec_object(otype, payload, flags=0xFFFF):
 
 
 def cec_timestamp(t=None):
-    """The 12-byte CEC timestamp: u32 year, u8 month/day/weekday/hour/min/sec, u16 millisecond.
-
-    Cross-checked two ways against real data: the container header at +0x60 reads
-    `ea070000 081f0113 0b30c401` = 2026-08-31 Mon 19:11:48.452, and object 0x41 reads
-    `ea070000 0901020b 15338401` = 2026-09-01 Tue 11:21:51.388. Both match when those captures
-    were actually taken, and 1 Sep 2026 is indeed a Tuesday.
-    """
+    """The 12-byte CEC timestamp: u32 year, u8 month/day/weekday/hour/min/sec, u16 millisecond."""
     import time as _t
     lt = _t.localtime(t if t is not None else _t.time())
     ms = int((_t.time() % 1) * 1000)
@@ -1156,7 +915,7 @@ def cec_timestamp(t=None):
 
 def build_obj_41(mac, log=None):
     """Session-open object. Carries a nonce, the sender's MAC and a timestamp (payload 0x28)."""
-    payload = (bytes(random.getrandbits(8) for _ in range(8))      # nonce
+    payload = (bytes(random.getrandbits(8) for _ in range(8))
                + b'\x00' * 8
                + bytes(random.getrandbits(8) for _ in range(4))
                + bytes(mac) + b'\x00\x00'
@@ -1166,61 +925,27 @@ def build_obj_41(mac, log=None):
 
 
 def build_obj_11(token8, services):
-    """Declare our enabled titles INSIDE the link.
-
-    The payload is byte-for-byte the same TLV stream the probe carries in its Nintendo vendor IE:
-    the (A=1,B=1) service-list record followed by the (A=0,B=0xF,len=8) token record. Verified by
-    parsing the real captured 0x11 with sp_parse.parse_vendor_tlv -- exactly two records, no
-    trailing bytes, and the token equals that console's live probe token.
-    """
+    """Declare our enabled titles INSIDE the link."""
     svc = b''.join(struct.pack('>I', t) + bytes([f]) + bytes(tr) for t, f, tr in services)
     tlv = struct.pack('<H', (len(svc) << 8) | (1 << 4) | 1) + svc
     tlv += struct.pack('<H', (8 << 8) | (0xF << 4) | 0) + bytes(token8)
     return cec_object(0x11, tlv, flags=0xFFFF)
 
 
-# Mii Plaza's 32-byte HMAC key, recovered 1 Sep 2026 from MiiPlaza/code.bin @0x21DCCA.
-# It is a NUL-terminated ASCII string sitting in the plaza's string table right beside
-# "title_meet_logo" and "news_meet" -- the same strings meet_Cec_PublishOutgoingMessage uses for
-# its ex-headers. Found by brute-forcing every 32-byte window of the binary against two known
-# (body, trailer) pairs; it reproduces BOTH independently, so this is not a coincidence.
-#
-# This OVERTURNS MESSAGE_HMAC.md section 6 ("Mii Plaza attaches NO HMAC"), which was inferred from
-# the send path. The trailer is real, it is HMAC-SHA256 over exactly the body, and it IS verified
-# on receive -- proven by A/B/A on hardware: unmodified -> green LED, 14 changed body bytes ->
-# no green LED, unmodified again -> green LED.
 def plaza_hmac_key():
-    """Mii Plaza's message HMAC key, from YOUR console's CEC store via linuxpass.keys.
-
-    LinuxPass carries no copy: tools/lp_extract_keys.py --cec-store reads every title's key
-    out of its own MBoxInfo____ file on a dump you took yourself.
-    """
+    """Mii Plaza's message HMAC key, from your console's CEC store via linuxpass.keys."""
     import lp_keys
     return lp_keys.plaza_hmac_key()
 
-GREETING_OFF = 0x3F70          # within the plaza body
-GREETING_LEN = 0x22            # UTF-16LE, 16 chars + NUL  [P] sp_cec.PLAZA_MAP
+GREETING_OFF = 0x3F70
+GREETING_LEN = 0x22            # UTF-16LE, 16 chars + NUL
 
 
-MII_OFF = 0x36BC               # plaza body: the CFPB Mii container
+MII_OFF = 0x36BC
 
 
 def edit_mii(obj5, mii_name=None, author_name=None, fresh_identity=False, log=None):
-    """Edit the sender's Mii, correctly.
-
-    SUPERSEDES the old `fresh_mii`, which patched bytes at body+0x36D4 in the belief they were a
-    plaintext {Mii id, creator MAC} pair and that "the Mii block carries no CRC". Both were wrong,
-    and that is exactly why --fresh-mii won the green LED but never produced a visitor:
-
-      * the CFPB entry is AES-CCM wrapped (APT:U Unwrap, keyslot 0x31) -- the bytes we edited were
-        the CCM NONCE, and every edit broke the 16-byte MAC;
-      * the real Mii does carry a CRC-16/CCITT at +0x5E, inside the encryption;
-      * MiiPlaza 0x159A8C rejects the message on either failure, silently, after cecd has already
-        accepted it and lit the LED.
-
-    So the order is: unwrap -> edit -> reseal the Mii CRC -> re-wrap -> reseal the container HMAC.
-    See CFPB_MII.md. `sp_mii` reproduces both captured console wrappings byte-for-byte.
-    """
+    """Edit the sender's Mii, correctly."""
     import sp_mii
     b = bytearray(obj5)
     hs = struct.unpack_from('<I', b, 0x14 + 0x08)[0]
@@ -1237,17 +962,7 @@ def edit_mii(obj5, mii_name=None, author_name=None, fresh_identity=False, log=No
     if not mac_ok:
         raise ValueError('CFPB CCM MAC failed on the source message -- refusing to edit')
     if fresh_identity:
-        # A new identity makes us a genuinely new person to the plaza's visitor merge, which keys
-        # on {mii_id, creator_mac} (meet_AppendVisitor 0x30B758).
-        #
-        # Keep a REAL Nintendo OUI (b8:ae:6e, the 2DS's) rather than our locally-administered
-        # ba:ae:6e monitor prefix. A Mii's creator MAC is the burned-in address of the console that
-        # made it, never a LAA, so an LAA here would test "does the plaza mind a strange OUI" at
-        # the same time as "does it accept a new identity" -- and a null result would not say which
-        # one failed. Only the low 3 bytes and the Mii id vary.
-        # NOT a raw random u32: the byte at CFL+0x0C must have bit 5 clear or the plaza drops the
-        # message after cecd has already lit the LED. That is what killed run 2 on 1 Sep 2026
-        # (id a41067a7, byte0 0xa7). sp_mii.random_mii_id() generates the shape real Miis have.
+        # Keep a real Nintendo OUI, because a Mii's creator MAC is never locally administered.
         cfl = sp_mii.set_identity(cfl, mii_id=sp_mii.random_mii_id(),
                                   creator_mac=bytes([0xb8, 0xae, 0x6e]) +
                                   bytes(random.getrandbits(8) for _ in range(3)))
@@ -1266,7 +981,6 @@ def edit_mii(obj5, mii_name=None, author_name=None, fresh_identity=False, log=No
     if log:
         log('  MII passes the plaza gate (CRC, identity non-zero, id byte bit5 clear)')
     newbody = sp_mii.write_plaza_mii(body, cfl)
-    # re-wrap must round-trip, or we would ship something the plaza silently drops
     chk, chk_ok = sp_mii.read_plaza_mii(newbody)
     if not chk_ok or chk != cfl:
         raise ValueError('re-wrapped Mii does not verify -- refusing to transmit')
@@ -1282,12 +996,7 @@ def fresh_mii(obj5, log=None):
 
 
 def reseal(obj5, log=None):
-    """Recompute the container's 32-byte trailer = HMAC-SHA256(plaza key, body).
-
-    Layout, all firmware-derived: the container starts after the 0x14 envelope; the body runs
-    [header_size, header_size+body_size) and the tag sits immediately after it, ending at
-    total_size. cecd 0x11CC7C verifies exactly that range with keylen 0x20.
-    """
+    """Recompute the container's 32-byte trailer = HMAC-SHA256(plaza key, body)."""
     import hmac as _hmac, hashlib as _hashlib
     b = bytearray(obj5)
     hs = struct.unpack_from('<I', b, 0x14 + 0x08)[0]
@@ -1306,27 +1015,15 @@ def reseal(obj5, log=None):
 
 
 def set_greeting(obj5, text, log):
-    """Rewrite the Mii Plaza greeting inside the container, in place.
-
-    The field is FIXED SIZE (0x22 bytes at body+0x3F70), so every length in the message is
-    preserved -- envelope, header_size, body_size, total_size and the 0x81 announcement all stay
-    valid, and only the 34 greeting bytes change.
-
-    THIS IS THE EXPERIMENT the 32-byte trailer has been blocking. The trailer covers exactly the
-    body (cecd 0x11CC7C hmacs [base+hdr[0x08], +bodySize)), so touching the greeting invalidates it
-    IF it is checked. Static RE says Mii Plaza never sets the HMAC key -- constructor nulls +0x13C,
-    the publish path never writes it, and WriteMessage never reads it -- so the prediction is that
-    it is NOT checked on this path. A green light with a changed greeting proves that; no green
-    light says the trailer (or something else over the body) is verified after all.
-    """
+    """Rewrite the Mii Plaza greeting inside the container, in place."""
     enc = text.encode('utf-16-le')
     if len(enc) > GREETING_LEN - 2:
         raise ValueError('greeting too long: %d UTF-16 bytes, max %d'
                          % (len(enc), GREETING_LEN - 2))
     enc = enc + b'\x00' * (GREETING_LEN - len(enc))
     b = bytearray(obj5)
-    hs = struct.unpack_from('<I', b, 0x14 + 0x08)[0]          # container header_size
-    off = 0x14 + hs + GREETING_OFF                            # envelope + header + body offset
+    hs = struct.unpack_from('<I', b, 0x14 + 0x08)[0]
+    off = 0x14 + hs + GREETING_OFF
     old = bytes(b[off:off + GREETING_LEN])
     b[off:off + GREETING_LEN] = enc
     b = bytearray(reseal(bytes(b), log))
@@ -1340,17 +1037,7 @@ def set_greeting(obj5, text, log):
 
 
 def object_index(outbox, otype):
-    """Index of the first object of type `otype` in `outbox`, or None.
-
-    Objects MUST be located by type, never by a fixed index. --full-sequence prepends three
-    objects (0x41/0x43/0x11) and a multi-title forward appends one object per message, so any
-    hardcoded index is wrong under some combination of flags. This cost a complete two-title run
-    on 2 Sep 2026: the mirrored 0x33 was written to outbox[3], which under --full-sequence is the
-    0x21 -- already sent -- so the console received our 0x33 in OUR order while its own list was in
-    ITS order, cecd 0x1148C0 hit `A[i].title != B[i].title` at entry 0, and the console abandoned
-    the exchange without a reply (state 0xF2). The symptom is a 0x33 that is delivered and
-    acknowledged, followed by silence where the 0x34 should be.
-    """
+    """Index of the first object of type `otype` in `outbox`, or None."""
     for i, o in enumerate(outbox):
         if len(o) >= 8 and o[0:2] == b'cc' and struct.unpack_from('<I', o, 4)[0] == otype:
             return i
@@ -1358,16 +1045,7 @@ def object_index(outbox, otype):
 
 
 def reorder_offer_object(our_33, console_ee, log):
-    """Our own 0x33, with its entries put into the CONSOLE's order.
-
-    cecd 0x1148C0 walks our list and its own in parallel and rejects the pair as soon as the
-    titles at the same index differ, so with more than one title the order is not ours to choose.
-    Reordering our own entries is preferable to mirroring the console's record wholesale: the
-    titles and the count end up identical either way, but our sizes and send modes stay ours.
-
-    Falls back to a straight mirror if the two title sets are not the same, which is the only
-    thing that has a chance of passing the count check.
-    """
+    """Our own 0x33, with its entries put into the console's order."""
     if len(our_33) < 0x10 + 0x2C or len(console_ee) < 0x2C or console_ee[0:2] != b'ee':
         return None
     ours = bytearray(our_33[0x10:])
@@ -1395,20 +1073,7 @@ def reorder_offer_object(our_33, console_ee, log):
 
 
 def mirror_offer_object(ee_src, log):
-    """Build our type-0x33 by MIRRORING the list the console just offered in its 0x32.
-
-    Derived from firmware, not guessed. cecd 0x1148C0 validates our 0x33 list against the console's
-    own: first `count(ours) == count(theirs)` (0x10EE42 reads the count the parser stored), then a
-    per-entry comparison of `base + i*32 + 0x2C`, which the parser at 0x10E234 shows is entry i's
-    first u32 -- the TITLE ID. So the only list that can pass is the console's own.
-
-    Wire `ee` record (0x10E234): u16 magic 0x6565, u32 size @+0x04, u32 count @+0x08 (max 0x18),
-    0x2C-byte header, then `count` entries of 32 bytes from +0x2C. An entry is
-    titleID(4) | flags(4) | size(4) | index(4) | 16 zero bytes.
-
-    The 0x31 and 0x33 forms of the same list differ in exactly two bytes: the object type, and
-    each entry's byte at +0x06 (0x00 -> 0x01). Verified by diffing the two captured objects.
-    """
+    """Build our type-0x33 by mirroring the list the console just offered in its 0x32."""
     ee = bytearray(ee_src)
     if len(ee) < 0x2C or ee[0:2] != b'\x65\x65':
         log('  cannot mirror: source is not an ee record')
@@ -1427,15 +1092,7 @@ def mirror_offer_object(ee_src, log):
 
 
 def empty_offer_object(log):
-    """A type-0x33 object whose `ee` list is EMPTY (count 0).
-
-    Single-variable test of the validator found at cecd 0x1148C0, whose FIRST gate is
-    `count(ours) != count(theirs) -> error 0xC8810BEF`. On the wire our normal 0x33 declares
-    count 1 while the console's 0x32 declares count 0, so this should be the exact thing that
-    aborts the exchange. Byte-for-byte this is the console's own 0x32 payload shape (ee record
-    length 0x2C, no entries) with the type changed to 0x33 -- so if the console still refuses it,
-    the count is NOT the gate and the model is wrong.
-    """
+    """A type-0x33 object whose `ee` list is empty (count 0)."""
     ee = b'\x65\x65\x00\x00' + struct.pack('<I', 0x2C) + b'\x00' * 0x24
     obj = (b'\x63\x63\xff\xff' + struct.pack('<I', 0x33) + struct.pack('<I', 0)
            + struct.pack('<I', len(ee)) + ee)
@@ -1444,13 +1101,7 @@ def empty_offer_object(log):
 
 
 def load_objects(prefix, log):
-    """Load the CEC objects we will send, in order, from <prefix>0.bin .. <prefix>N.bin.
-
-    These are replayed VERBATIM from a real console's exchange. The container carries a 32-byte
-    trailer that cecd checks as HMAC-SHA256 over exactly the body, under a key the application
-    supplies -- and we do not have that key (MESSAGE_HMAC.md). Editing any covered byte, including
-    the greeting text, would invalidate it. So the bytes go out exactly as captured.
-    """
+    """Load the CEC objects to send, in order, from <prefix>0.bin onward."""
     import glob as _glob
     objs = []
     i = 0
@@ -1469,8 +1120,7 @@ def load_objects(prefix, log):
 
 
 def rt_channel_freq(raw):
-    """Radiotap Channel frequency in MHz, or None. Walks the present bitmap the same way
-    strip_fcs_radiotap does -- the FIRST word describes the fields, later words only chain."""
+    """Radiotap Channel frequency in MHz, or None."""
     if len(raw) < 12:
         return None
     fields = struct.unpack_from('<I', raw, 4)[0]
@@ -1480,14 +1130,14 @@ def rt_channel_freq(raw):
             return None
         chain = struct.unpack_from('<I', raw, off)[0]
         off += 4
-    if fields & (1 << 0):                       # TSFT, 8-byte aligned
+    if fields & (1 << 0):
         off = (off + 7) & ~7
         off += 8
-    if fields & (1 << 1):                       # Flags
+    if fields & (1 << 1):
         off += 1
-    if fields & (1 << 2):                       # Rate
+    if fields & (1 << 2):
         off += 1
-    if fields & (1 << 3):                       # Channel, 2-byte aligned
+    if fields & (1 << 3):
         off = (off + 1) & ~1
         if off + 2 <= len(raw):
             return struct.unpack_from('<H', raw, off)[0]
@@ -1495,19 +1145,10 @@ def rt_channel_freq(raw):
 
 
 def strip_fcs_radiotap(raw, mpdu):
-    """Drop the trailing FCS if radiotap's Flags field says the radio appended one.
-
-    Load-bearing: CCMP takes the last 8 bytes as the MIC, so 4 stray FCS bytes make every frame
-    fail to verify under every key -- indistinguishable from a wrong key. The ath9k box DOES
-    append it (radiotap Flags bit 0x10), the MT7902 does not, so it must be decided per frame.
-
-    Note the two roles of the present bitmap: the FIRST word says which fields are present, while
-    any further words only chain the namespace. Advancing `off` past them is right; reading field
-    flags out of the last one is not.
-    """
+    """Drop the trailing FCS if radiotap's Flags field says the radio appended one."""
     if len(raw) < 8:
         return mpdu
-    fields = struct.unpack_from('<I', raw, 4)[0]        # the word that describes the fields
+    fields = struct.unpack_from('<I', raw, 4)[0]
     if not (fields & (1 << 1)):                         # no Flags field -> cannot tell
         return mpdu
     off, chain = 8, fields
@@ -1516,7 +1157,7 @@ def strip_fcs_radiotap(raw, mpdu):
             return mpdu
         chain = struct.unpack_from('<I', raw, off)[0]
         off += 4
-    if fields & (1 << 0):                               # TSFT: 8 bytes, 8-byte aligned
+    if fields & (1 << 0):
         off = (off + 7) & ~7
         off += 8
     if off < len(raw) and (raw[off] & 0x10) and len(mpdu) > 4:
@@ -1524,15 +1165,6 @@ def strip_fcs_radiotap(raw, mpdu):
     return mpdu
 
 
-
-# ---------------------------------------------------------------------------------------------
-# simulation -- drive the REAL state machine with a scripted console
-#
-# This is the closest thing to a live run that does not need a console. It replays the actual
-# captured handshake INTO Link.pump() through a fake socket, using the real captured MACs, tokens
-# and the real encrypted SYN|ACK frame, and asserts the machine reaches DONE having decrypted it.
-# It therefore exercises key derivation, the state transitions, the reply frames and the decrypt
-# path together -- the parts that a unit test on builders alone would miss.
 
 class _FakeSock:
     """Feeds queued RX frames to select()/recv() and records everything sent."""
@@ -1571,38 +1203,14 @@ def _rt(mpdu):
 
 
 def simulate(verbose=1, peer_hook=None, out=None):
-    """-> 0 if the state machine completes the handshake and decrypts the console's SYN|ACK.
-
-    `peer_hook` lets a caller (the relay) plug its own "what do I serve this console" decision into
-    the real state machine, driven by the real captured frames. That is the only way to test the
-    relay's selection against sp_link's actual contract rather than against a mock of it.
-
-    NOTE the return code is only meaningful for the EMPTY outbox this normally runs with. The
-    script is a handshake capture: the console sends its SYN|ACK and nothing further, so a run that
-    has real content queued correctly does NOT reach DONE -- it sits in SYNSENT waiting for
-    acknowledgements the recording cannot give it. Pass `out={}` and assert on `out['link']`
-    instead (`decrypted`, `max_state`, `peer`).
-    """
-    # WHOSE HANDSHAKE THIS IS.  A capture is a recording of two specific consoles: their
-    # session MACs and their session tokens are in every frame of it, so the recording itself
-    # is not ours to publish. The script therefore works two ways.
-    #
-    #   with a corpus   -- vectors.json supplies the real MACs, tokens and captured frames,
-    #                      and this replays an actual console exchange.
-    #   without one     -- the identities below are documentation values and the console's
-    #                      reply is BUILT here, with a throwaway key, from the same builders
-    #                      the transmitter uses. Every step still runs: probe parse, token
-    #                      capture, key derivation, CCMP decrypt, YY parse, state machine.
-    #
-    # See lp_corpus.py, and docs/wiki/Running-the-self-tests.md for the vectors.json shape.
+    """-> 0 if the state machine completes the handshake and decrypts the console's SYN|ACK."""
     import lp_corpus as corpus
     V = corpus.vector('handshake') or {}
     CON = V.get('console_mac') or '96:58:cb:11:22:33'
     CON_TOK = V.get('console_token') or '0011223344556677'
     US = V.get('our_mac') or 'ba:ae:6e:44:55:66'
     US_TOK = V.get('our_token') or '8899aabbccddeeff'
-    # A throwaway key pair, used only when the recording is synthetic. Seventeen bytes,
-    # because cecd's key length is 0x11 and the trailing NUL counts.
+    # Seventeen bytes: cecd's key length is 0x11 and the trailing NUL counts.
     SIM_KEY17 = b'LinuxPassSelfTest'
     SIM_NORMALKEY = bytes(range(16))
     use_real_keys = bool(V.get('synack'))
@@ -1620,7 +1228,6 @@ def simulate(verbose=1, peer_hook=None, out=None):
     if out is not None:
         out['link'] = L
 
-    # 1. the console's StreetPass probe response, carrying its token
     resp = bytes.fromhex(
         '5000' '0000' + US.replace(':', '') + CON.replace(':', '') + CON.replace(':', '') + '0030'
         + 'f644000000000000' + '6400' + '0200'
@@ -1628,13 +1235,10 @@ def simulate(verbose=1, peer_hook=None, out=None):
         + '0108' + '82848b0c12961824'
         + '03010b' + '06020000' + '3204' + '3048606c'
         + 'dd15' + '001f3201' + '110500020800' + '00f008' + CON_TOK)
-    # 2. the link-BSS probe response: capability 0x0012 (IBSS|PRIVACY), hidden SSID
     link = bytes.fromhex(
         '5000' '0000' + US.replace(':', '') + CON.replace(':', '') + CON.replace(':', '') + '0040'
         + '186f000000000000' + '6400' + '1200'
         + '0000' + '0108' + '82848b0c12961824' + '03010b' + '06020000' + '3204' + '3048606c')
-    # 3. the console's encrypted YY SYN|ACK. From the corpus this is a real captured frame;
-    #    otherwise it is built here, which is the same thing the console does.
     expect_key = derive_ccmp_key(
         bytes.fromhex(CON_TOK), bytes.fromhex(US_TOK), T.macbytes(CON), T.macbytes(US),
         key17=None if use_real_keys else SIM_KEY17,
@@ -1645,9 +1249,6 @@ def simulate(verbose=1, peer_hook=None, out=None):
         synack = build_encrypted_data(expect_key, T.macbytes(CON), T.macbytes(US),
                                       T.macbytes(CON), 1, build_yy(0x12), seq=95)
 
-    # A neighbour WPA access point's PRIVACY-flagged probe response, delivered BEFORE the
-    # console engages. This is the exact frame that hijacked the state machine on ch1 and made the
-    # tool ignore the real console; it must be ignored and must not advance any state.
     FOREIGN = '00:00:5e:00:53:01'
     foreign = bytes.fromhex(
         '5000' '0000' + US.replace(':', '') + FOREIGN.replace(':', '')
@@ -1671,9 +1272,6 @@ def simulate(verbose=1, peer_hook=None, out=None):
         ok += bool(c)
         print('  [%s] %s%s' % ('PASS' if c else 'FAIL', n, ('  %s' % (g,)) if g else ''))
 
-    # With a peer_hook there is real content queued, and the recording never acknowledges it --
-    # the run correctly waits in SYNSENT instead of finishing. Assert what the script can actually
-    # demonstrate in that case, rather than printing a FAIL that is not one.
     if peer_hook is None:
         chk('reached DONE', L.state == Link.DONE, Link.STATE_NAME[L.state])
     else:
@@ -1694,9 +1292,6 @@ def simulate(verbose=1, peer_hook=None, out=None):
     chk('sent the directed probe', L.sent.get('directed probe', 0) >= 1, L.sent.get('directed probe'))
     chk('sent exactly one encrypted SYN', L.sent.get('YY SYN') == 1, L.sent.get('YY SYN'))
 
-    # The SYN we put on air must be decryptable BY THE CONSOLE -- i.e. under the same key, with
-    # the AAD its own addressing implies. Building a frame is not the same as building a readable
-    # one, and this is the check that separates them.
     syn = [m for w, m in L.sent_frames if w == 'YY SYN']
     chk('our transmitted SYN is exactly one frame', len(syn) == 1)
     if syn and L.keys:
@@ -1715,15 +1310,8 @@ def simulate(verbose=1, peer_hook=None, out=None):
     return 0 if ok == tot else 1
 
 
-# ---------------------------------------------------------------------------------------------
-
 def replay(paths, mac=None):
-    """Decode captures with the Stage 2 decoder: find the handshake, derive keys, decrypt.
-
-    Takes SEVERAL pcaps, because a two-radio session splits the evidence: the tokens live in the
-    probes one radio heard and the encrypted frames in what the other heard. Pooling is safe --
-    nothing here depends on capture order.
-    """
+    """Decode captures with the Stage 2 decoder: find the handshake, derive keys, decrypt."""
     from scapy.all import PcapReader, Dot11
     frames = []
     for path in paths:
@@ -1796,7 +1384,6 @@ def selftest():
         skipped += 1
         print('  [SKIP] %s  (%s)' % (n, why))
 
-    # YY builder against the real decrypted plaintext
     want = bytes.fromhex('aaaa030000000800000059593000addeafbe00000000000000000c12b83800000000')
     chk('build_yy(SYN|ACK) == decrypted spectral_attempt1 #73', build_yy(0x12) == want)
     syn = build_yy(sp_yy.SYN)
@@ -1806,15 +1393,9 @@ def selftest():
     chk('our SYN parses back', y and y['ok'] and y['flags'] == sp_yy.SYN and y['length'] == 0x30)
     chk('our SYN advertises the observed window', y['window'] == WINDOW, y['window'])
 
-    # CCMP header
     chk('ccmp_header(1) matches capture', ccmp_header(1).hex() == '0100002000000000')
     chk('ccmp_header(2) matches capture', ccmp_header(2).hex() == '0200002000000000')
 
-    # THE FRAME BUILDER, against a real console frame where one is available.
-    # The captured frame, and the two session tokens that key it, belong to specific consoles
-    # -- so the recording lives in your corpus, not in this file. Without one the same builder
-    # is checked for self-consistency under a throwaway key, which still exercises the CCMP
-    # header, the AAD, the addressing and the sequence number.
     V = corpus.vector('handshake') or {}
     if V.get('synack'):
         key = derive_ccmp_key(bytes.fromhex(V['console_token']), bytes.fromhex(V['our_token']),
@@ -1837,9 +1418,6 @@ def selftest():
     chk('pn_of reads our own frame back', sp_ccmp.pn_of(built) == 1, sp_ccmp.pn_of(built))
     chk('our frame decrypts to the YY SYN|ACK', sp_ccmp.decrypt(key, built) == want)
 
-    # KEY DERIVATION ORDERING. The consoleID pair is swapped by role, so the two orderings
-    # must give different keys -- that is a property of the derivation and needs no real
-    # identities to demonstrate.
     th = bytes.fromhex('0011223344556677'); tc = bytes.fromhex('8899aabbccddeeff')
     mh = T.macbytes('96:58:cb:11:22:33'); mc = T.macbytes('ba:ae:6e:44:55:66')
     kw = {'key17': b'LinuxPassSelfTest', 'keyslot_2e_normalkey': bytes(range(16))}
@@ -1852,28 +1430,22 @@ def selftest():
     else:
         skip('host-first ordering reproduces the MIC-verified key', corpus.why_skipped())
 
-    # FCS stripping
     rt_fcs = struct.pack('<BBHIBB', 0, 0, 10, (1 << 1) | (1 << 2), 0x10, 2)
     chk('FCS stripped when radiotap Flags says so',
         strip_fcs_radiotap(rt_fcs + b'A' * 20, b'A' * 20) == b'A' * 16)
     rt_nofcs = struct.pack('<BBHIBB', 0, 0, 10, (1 << 1) | (1 << 2), 0x00, 2)
     chk('FCS kept when the flag is clear',
         strip_fcs_radiotap(rt_nofcs + b'A' * 20, b'A' * 20) == b'A' * 20)
-    # the ath9k shape: TSFT + Flags + Rate + Channel + signal + RX_flags, with the Ext/NS chain.
-    # Regression guard: reading the flags out of the CHAINED present word instead of the first
-    # one silently disables FCS stripping, and then nothing decrypts under any key.
     rt_ath = (struct.pack('<BBHII', 0, 0, 36, 0xa000402f, 0x00000000)
               + struct.pack('<I', 0) + b'\x00' * 8 + bytes([0x10]))
     chk('ath9k-shaped radiotap (chained present words) still finds the FCS flag',
         strip_fcs_radiotap(rt_ath + b'A' * 20, b'A' * 20) == b'A' * 16)
 
-    # the pure-python crypto backend must agree on our own frame
     sp_ccmp.HAVE_PYCRYPTO = False
     chk('pure-stdlib backend builds the identical frame',
         build_encrypted_data(*_bargs, build_yy(0x12), seq=_bseq) == built)
     sp_ccmp.HAVE_PYCRYPTO = hasattr(sp_ccmp, 'AES') and sp_ccmp.AES is not None
 
-    # --- integration: the Stage 3 sender must produce frames the peer can actually read -----
     class _L(Link):
         def __init__(self, yy_rate=11.0):
             self.a = argparse.Namespace(verbose=0, iface='sim', yy_rate=yy_rate)
@@ -1886,7 +1458,7 @@ def selftest():
         def send(self, mpdu, rate=1.0, noack=True, what=''):
             self.sent_frames.append((what, mpdu, rate)); return True
     L2 = _L()
-    payload = bytes(range(256)) * 4                     # 1024 B
+    payload = bytes(range(256)) * 4
     L2.send_yy(sp_yy.ACK, 1452, 0, payload)
     what, mpdu, _r = L2.sent_frames[-1]
     chk('Stage 3 frame is CCMP-protected data to the console',
@@ -1900,22 +1472,18 @@ def selftest():
     chk('consecutive frames use consecutive PNs',
         sp_ccmp.pn_of(L2.sent_frames[-1][1]) == 2, sp_ccmp.pn_of(L2.sent_frames[-1][1]))
 
-    # --- the payload rate is a parameter, and it reaches the radio --------------------------
-    # A full segment is 1526 B on the wire: 12.4 ms at 1 Mbps against 1.3 ms at 11. That is half
-    # a four-title exchange, and a 12 ms frame is a large target on a channel with neighbours.
     chk('YY payload frames go out at the configured rate',
         all(r == 11.0 for _w, _m, r in L2.sent_frames), {r for _w, _m, r in L2.sent_frames})
     L3 = _L(yy_rate=1.0)
     L3.send_yy(sp_yy.ACK, 0, 0, b'x' * 1452)
     chk('and 1 Mbps is still selectable for the A/B', L3.sent_frames[-1][2] == 1.0,
         L3.sent_frames[-1][2])
-    seg = 24 + 8 + 10 + 24 + 1452 + 8                    # 802.11+CCMP+SNAP+YY+payload+MIC
-    us = lambda mbps: seg * 8 / mbps + 192               # + DSSS long preamble
+    seg = 24 + 8 + 10 + 24 + 1452 + 8
+    us = lambda mbps: seg * 8 / mbps + 192
     chk('the airtime claim behind the change is arithmetic, not hope',
         round(us(1.0) / 1000, 1) == 12.4 and round(us(11.0) / 1000, 1) == 1.3,
         (round(us(1.0) / 1000, 1), round(us(11.0) / 1000, 1)))
 
-    # a real captured object, segmented and reassembled through the real code paths
     obj = corpus.load('plaza_message')
     if obj is None:
         skip('the real 32,732 B message segments and rejoins intact', corpus.why_skipped())
@@ -1931,7 +1499,6 @@ def selftest():
             rebuilt += yy['payload']
         chk('every segment survives a build/parse round trip', bytes(rebuilt) == obj)
 
-    # ---- object location and 0x33 alignment (the two-title failure of 2 Sep 2026) ----
     import sp_build
     pmsg = corpus.load('plaza_outbox')
     mmsg = corpus.load('second_title_outbox')
@@ -1948,7 +1515,6 @@ def selftest():
             struct.unpack_from('<I', ob[3], 4)[0] == 0x21)
         chk('object_index returns None for a type that is not there',
             object_index(ob, 0x77) is None)
-        # the console's real offer from the failed run: MK7 first, Plaza second -- the reverse of ours
         theirs_ee = (b'ee\x00\x00' + struct.pack('<II', 0x6C, 2) + b'\x00' * 0x20
                      + struct.pack('<IIII', 0x00030600, 0x00303, 0x377C, 1) + b'\x00' * 0x10
                      + struct.pack('<IIII', 0x00020800, 0x00300, 0x7FC8, 1) + b'\x00' * 0x10)
@@ -1967,14 +1533,11 @@ def selftest():
             struct.unpack_from('<H', fee, 0x2C + 0x20 + 6)[0] == 1)
         chk('the reordered record declares its own size and count',
             struct.unpack_from('<II', fee, 4) == (0x6C, 2) and len(fee) == 0x6C)
-        # (moved inside this block: it reads `ob`, which only exists when the corpus does)
         chk('a differing title set falls back to a straight mirror',
             reorder_offer_object(ob[i33],
                                  b'ee\x00\x00' + struct.pack('<II', 0x4C, 1) + b'\x00' * 0x20
                                  + struct.pack('<IIII', 0x00141000, 0x00303, 0x100, 1)
                                  + b'\x00' * 0x10, lambda m, l=1: None) is not None)
-    # (built here, not inside the corpus-gated block above: it depends on nothing in it, and
-    #  having it in there made a run with no corpus die instead of skipping)
     f2 = cec_object(0xF2, b'\x00' * 4)
     chk('the 0xF2 probe is a well-formed 0x6363 wrapper',
         f2[0:2] == b'cc' and struct.unpack_from('<I', f2, 4)[0] == 0xF2, f2.hex())
@@ -1983,10 +1546,6 @@ def selftest():
         struct.unpack_from('<I', f2, 0x0C)[0])
     chk('and the whole object is small enough to be one segment', len(f2) <= 1452, len(f2))
 
-    # ---- console-presence reporting -----------------------------------------------------------
-    # These exist because "console heard : NONE" was printed in passes that completed a full
-    # exchange, and the verdict then told the operator nothing was transmitting. Both claims were
-    # wrong, and separating a refusing console from an absent one is what these two counters do.
     class _L:
         def __init__(self):
             self.lines = []
@@ -2028,8 +1587,7 @@ def selftest():
 
 
 def build_parser():
-    """The full option set, so other tools (the relay) can build a Link's arguments without
-    duplicating defaults that would then drift."""
+    """The full option set, shared so other tools can build a Link's arguments."""
     ap = argparse.ArgumentParser(description='Stage 2: complete the link, decrypt the console.')
     ap.add_argument('--iface', default='mon0')
     ap.add_argument('--channel', default='1,6,11',
