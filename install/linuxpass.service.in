@@ -42,12 +42,14 @@ Environment=SP_IDLE=2
 # otherwise turn one bad character into an endless crash loop.
 Environment=SP_ROTATE=0
 Environment=SP_EXTRA=
+# The one desktop user allowed to use the control socket; empty means root only.
+Environment=SP_CONTROL_USER=__GUI_USER__
 # Root-owned, and listed last so it wins over the settings above.
 EnvironmentFile=-/var/lib/linuxpass/relay.env
 
 # Rebuilt on every (re)start, so a restart is also the recovery for a wedged interface.
 ExecStartPre=__ROOT__/scripts/sp_monitor.sh up
-ExecStart=/bin/sh -c 'exec __PY__ __ROOT__/linuxpass/sp_relay.py run --store "$SP_STORE" --iface "$SP_MON" --channel "$SP_CHANNELS" --window "$SP_WINDOW" --idle "$SP_IDLE" --rotate-every "$SP_ROTATE" $SP_EXTRA'
+ExecStart=/bin/sh -c 'exec __PY__ __ROOT__/linuxpass/sp_relay.py run --store "$SP_STORE" --iface "$SP_MON" --channel "$SP_CHANNELS" --window "$SP_WINDOW" --idle "$SP_IDLE" --rotate-every "$SP_ROTATE" --control-user "$SP_CONTROL_USER" $SP_EXTRA'
 ExecStopPost=__ROOT__/scripts/sp_monitor.sh down
 
 # The daemon sends WATCHDOG=1 from inside its sniffing loop, at most every 5 s. If the radio

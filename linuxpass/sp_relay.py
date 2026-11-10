@@ -34,7 +34,7 @@ Design notes that matter:
 * **Nothing here may reboot the machine.** A wedged pass is recovered by restarting the SERVICE
   and rebuilding the monitor interface; see `linuxpass.service` and `--pass-timeout`.
 """
-import os, sys, json, time, socket, struct, threading, random, argparse, re
+import os, sys, json, time, socket, stat, struct, threading, random, argparse, re, pwd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sp_store, sp_cecstore, sp_cec, sp_harvest_air, sp_build
@@ -86,6 +86,38 @@ def sp_identity_seed():
     """The one seed string, read from sp_identity so the two can never drift apart."""
     import sp_identity
     return sp_identity.SEED_PREFIX
+
+
+def peer_can_read(path, uid):
+    """Could `uid` read `path` itself? The daemon is root and must not read on behalf of someone who cannot."""
+    if uid == 0:
+        return True
+    try:
+        user = pwd.getpwuid(uid)
+        groups = set(os.getgrouplist(user.pw_name, user.pw_gid))
+    except KeyError:
+        groups = set()
+
+    def allowed(st, bit):
+        if st.st_uid == uid:
+            return bool((st.st_mode >> 6) & bit)
+        if st.st_gid in groups:
+            return bool((st.st_mode >> 3) & bit)
+        return bool(st.st_mode & bit)
+
+    real = os.path.realpath(path)
+    try:
+        parent = os.path.dirname(real)
+        while True:
+            if not allowed(os.stat(parent), 1):
+                return False
+            if parent == os.path.dirname(parent):
+                break
+            parent = os.path.dirname(parent)
+        st = os.stat(real)
+    except OSError:
+        return False
+    return allowed(st, 4) and (not stat.S_ISDIR(st.st_mode) or allowed(st, 1))
 
 
 def sd_notify(state):
@@ -468,15 +500,17 @@ def import_from_log(store, log_path, log=print):
 class Control:
     """A line protocol over a unix socket: one JSON request per line, one JSON reply."""
 
-    def __init__(self, path, relay):
+    def __init__(self, path, relay, owner=None):
         self.path = path
         self.relay = relay
+        #: Name of the one non-root user allowed to connect, or None for root only.
+        self.owner = owner
         self.sock = None
         self.thread = None
         self.failed = None
         self.stop = threading.Event()
 
-    def handle(self, req):
+    def handle(self, req, peer_uid=None):
         cmd = (req.get('cmd') or '').lower()
         r = self.relay
         if cmd == 'status':
@@ -600,6 +634,8 @@ class Control:
             except Exception as e:
                 return {'ok': False, 'error': '%s: %s' % (type(e).__name__, e)}
         if cmd == 'import':
+            if peer_uid is not None and not peer_can_read(req.get('path', ''), peer_uid):
+                return {'ok': False, 'error': 'you cannot read %s' % req.get('path', '')}
             try:
                 with r.lock:
                     n = import_into(r.store, req['path'], r.log,
@@ -623,18 +659,21 @@ class Control:
             self.relay.log('  CONTROL SOCKET UNAVAILABLE at %s -- %s' % (self.path, self.failed))
             self.relay.log('  the daemon will keep exchanging, but nothing can pause or query it')
             return
-        # The daemon runs as root, so the socket lands root-owned and mode 0755 -- connect(2)
-        # needs WRITE permission, so the ordinary-user CLI (and the GUI) get EACCES. Make it
-        # writable; the store directory is the access boundary, not the socket mode.
+        # Done before listen(), so nobody can connect while the permissions are still open.
         try:
-            os.chmod(self.path, 0o666)
-        except OSError:
-            pass
+            os.chmod(self.path, 0o600)
+            if self.owner and os.geteuid() == 0:
+                os.chown(self.path, pwd.getpwnam(self.owner).pw_uid, -1)
+        except (OSError, KeyError) as e:
+            self.relay.log('  control socket stays root-only: cannot give it to %r (%s)'
+                           % (self.owner, e))
         self.sock.listen(4)
         self.sock.settimeout(0.5)
         while not self.stop.is_set():
             try:
                 conn, _ = self.sock.accept()
+                peer_uid = struct.unpack('3i', conn.getsockopt(
+                    socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize('3i')))[1]
             except socket.timeout:
                 continue
             except OSError:
@@ -642,7 +681,7 @@ class Control:
             with conn:
                 try:
                     data = conn.recv(65536).decode('utf-8', 'replace').strip()
-                    reply = self.handle(json.loads(data) if data else {})
+                    reply = self.handle(json.loads(data) if data else {}, peer_uid)
                 except Exception as e:
                     reply = {'ok': False, 'error': '%s: %s' % (type(e).__name__, e)}
                 try:
@@ -1324,7 +1363,7 @@ class Relay:
 
     def run(self):
         sock = control_socket_path(self.a.store)
-        ctl = Control(sock, self)
+        ctl = Control(sock, self, owner=getattr(self.a, 'control_user', None))
         ctl.start()
         # Settle the identity BEFORE announcing it. Otherwise the banner names the store's fixed
         # MAC and the next line silently replaces it, which is exactly the sort of log that sends
@@ -1884,6 +1923,29 @@ def _selftest():
         time.sleep(0.3)
         try:
             chk('status answers over the socket', send_command(sockp, 'status')['ok'])
+            chk('the control socket is private to its owner',
+                stat.S_IMODE(os.stat(sockp).st_mode) == 0o600,
+                oct(stat.S_IMODE(os.stat(sockp).st_mode)))
+            me, other = os.getuid(), os.getuid() + 1
+            # Under /tmp because the suite's own directory is closed to other users.
+            pdir = tempfile.mkdtemp(prefix='linuxpass-perm-', dir='/tmp')
+            os.chmod(pdir, 0o755)
+            secret = os.path.join(pdir, 'secret')
+            open(secret, 'w').close()
+            os.chmod(secret, 0o600)
+            chk('a caller may import a file it can read', peer_can_read(secret, me))
+            chk('but not a file only someone else can read', not peer_can_read(secret, other))
+            os.chmod(secret, 0o644)
+            chk('a world-readable file is fine', peer_can_read(secret, other))
+            os.chmod(pdir, 0o700)
+            chk('unless a directory above it is closed', not peer_can_read(secret, other))
+            os.chmod(pdir, 0o755)
+            chk('a missing file is not readable', not peer_can_read(secret + 'x', other))
+            os.chmod(secret, 0o600)
+            refused = ctl.handle({'cmd': 'import', 'path': secret}, peer_uid=other)
+            chk('import refuses a path the caller cannot read',
+                not refused['ok'] and 'cannot read' in refused['error'], refused)
+            shutil.rmtree(pdir, ignore_errors=True)
             chk('pause disables exchanges',
                 send_command(sockp, 'pause')['enabled'] is False and r.enabled is False)
             chk('resume re-enables them',
@@ -2276,6 +2338,9 @@ def main():
                           'unrecovered baseline.')
     run.add_argument('--pcap', action='store_true')
     run.add_argument('--verbose', '-v', type=int, default=1)
+    run.add_argument('--control-user', default=os.environ.get('SUDO_USER'), metavar='NAME',
+                     help='the one non-root user allowed to use the control socket '
+                          '(default: whoever ran sudo; empty means root only)')
 
     imp = sub.add_parser('import', help='ingest CEC data into the store')
     imp.add_argument('path', help='a save image, a mounted dump, or an emulator NAND directory')

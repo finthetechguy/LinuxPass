@@ -60,7 +60,8 @@ install)
   fi
   install_code
   install -d -o root -g root -m 0755 "$STATE"
-  sed -e "s|__ROOT__|$LIB|g" -e "s|__PY__|$PY|g" "$HERE/linuxpass.service.in" > "$UNIT"
+  sed -e "s|__ROOT__|$LIB|g" -e "s|__PY__|$PY|g" -e "s|__GUI_USER__|$GUI_USER|g" \
+      "$HERE/linuxpass.service.in" > "$UNIT"
   chmod 0644 "$UNIT"
   if [ ! -e "$DEFAULTS" ]; then
     cat > "$DEFAULTS" <<EOF
