@@ -1,41 +1,5 @@
 #!/usr/bin/env python3
-"""
-Write linuxpass.keys by reading constants out of YOUR OWN console dumps.
-
-LinuxPass ships no Nintendo key material. Two things it needs are not AES keyslots, so they
-do not come from aes_keys.txt -- they are fixed values compiled into binaries on your
-console. This tool reads them out of dumps you took yourself and writes them to
-
-    ~/.config/linuxpass/linuxpass.keys
-
-WHAT IT READS
-
-  --cecd PATH        the decrypted code.bin of the cecd system module (title 0004013000002602).
-                     cecd hashes the CCMP link key with a 17-byte HMAC key: 16 ASCII characters
-                     plus the trailing NUL, which is part of the key (cecd passes length 0x11).
-                     There are two, retail and development; the console picks by a config bit.
-
-                     Found here without hardcoding an offset: the development key is the 16
-                     lowercase hex digits in order -- a generic test string, not a secret --
-                     so we search for that, then take the 16-character string in the slot
-                     immediately before it, which is where the retail key lives. Pass
-                     --cecd-offset if a future cecd moves them apart.
-
-  --cec-store PATH   a console SAVE image (a CEC partition dump, e.g. partitionA.bin) or a
-                     directory holding an extracted CEC store. Every StreetPass title keeps
-                     its own 32-byte message HMAC key in its own MBoxInfo____ file, at +0x10.
-                     Mii Plaza's is the one LinuxPass needs to sign a plaza message so a real
-                     console will accept it.
-
-HOW TO GET THE DUMPS
-
-  cecd code.bin      GodMode9 -> [S:] SYSNAND VIRTUAL -> title.db ... or, more simply, dump
-                     NAND and extract the module. See the wiki page "Getting your keys".
-  CEC store          GodMode9 -> [1:] SYSNAND CTRNAND -> data/<id>/sysdata/00010026/00000000
-                     is the CEC partition. Copy it off as a file.
-
-Nothing is downloaded and nothing leaves your machine.
-"""
+"""Write linuxpass.keys by reading constants out of your own console dumps."""
 import argparse
 import os
 import string
@@ -46,8 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(HERE), 'linuxpass'))
 
 import lp_keys as keys                                              # noqa: E402
 
-# The development key is the sixteen lowercase hex digits, in order. Built rather than
-# quoted so it is self-evidently a generic string and not a secret being smuggled in.
+# The development key is a generic string that marks where the retail key sits.
 DEV_NEEDLE = (string.digits + 'abcdef').encode('ascii') + b'\x00'
 SLOT_STRIDE = 0x14          # the two keys sit in adjacent 4-byte-aligned 20-byte slots
 KEY_CHARS = 16
@@ -88,7 +51,6 @@ def extract_cec_store(path):
     """-> {'title_hmac_XXXXXXXX': b'...'} for every title in a CEC store."""
     import sp_cecstore
     if os.path.isdir(path):
-        # an extracted store: CEC/<title>/MBoxInfo____ somewhere under `path`
         boxes = {}
         for root, _dirs, names in os.walk(path):
             if 'MBoxInfo____' not in names:
@@ -168,7 +130,6 @@ def main(argv=None):
         print('reading %s' % a.cec_store)
         values.update(extract_cec_store(a.cec_store))
 
-    # merge with anything already on file, so the two sources can be run separately
     existing = keys.constants()
     merged = dict(existing)
     merged.update(values)

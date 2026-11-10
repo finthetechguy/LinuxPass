@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
-"""Diagnostic: find the 3DS in a pcap. Lists probe SSIDs, vendor-IE OUIs, and MACs by OUI (flags Nintendo).
-Usage: sp_diag.py capture.pcap"""
+"""Diagnostic: find the 3DS in a pcap."""
 import sys, collections
 from scapy.all import PcapReader, Dot11, Dot11Elt
-# common Nintendo OUIs (3DS-era); prefix match
 NINTENDO_OUI = {b'\x00\x09\xbf',b'\x00\x16\x56',b'\x00\x17\xab',b'\x00\x19\x1d',b'\x00\x19\xfd',
  b'\x00\x1a\xe9',b'\x00\x1b\x7a',b'\x00\x1b\xea',b'\x00\x1c\xbe',b'\x00\x1d\xbc',b'\x00\x1e\x35',
  b'\x00\x1e\xa9',b'\x00\x1f\x32',b'\x00\x1f\xc5',b'\x00\x21\x47',b'\x00\x21\xbd',b'\x00\x22\x4c',

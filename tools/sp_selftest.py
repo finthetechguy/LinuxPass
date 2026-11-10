@@ -1,16 +1,5 @@
 #!/usr/bin/env python3
-"""
-End-to-end self-test for the StreetPass passive pipeline, using SYNTHETIC data.
-
-What this proves (no capture needed):
-  1. sp_cec parses a message built exactly the way Message::MakeMessageBinary serialises one.
-  2. The CCMP encrypt/decrypt model round-trips a plaza message split across MPDUs.
-  3. The key-derivation PERMUTATION SEARCH in sp_decrypt_pcap recovers a planted permutation.
-
-What this does NOT prove: that the real console uses the probe token as the KDF consoleID, or
-that the real host/client ordering is any particular one. Only a two-console capture settles that.
-Run:  ./.venv/bin/python sp_selftest.py
-"""
+"""End-to-end self-test for the StreetPass passive pipeline, using synthetic data."""
 import struct, sys
 from itertools import permutations
 import os as _os, sys as _sys
@@ -30,57 +19,55 @@ def build_plaza_message(greeting="hello streetpass", country="United Kingdom",
                         info_text="Mii Plaza", with_hmac=True):
     """Serialise exactly as Message::MakeMessageBinary @0x2dde6c does."""
     body = bytearray(sp_cec.PLAZA_BODY_SIZE)
-    struct.pack_into('<I', body, 0x36B8, 1)                       # present flag
-    # A real CFPB container holding one APT-wrapped Mii, so the sp_mii path is exercised too.
+    struct.pack_into('<I', body, 0x36B8, 1)
     import sp_mii
     cfl = bytearray(0x60)
     cfl[0x00] = 3
-    struct.pack_into('<I', cfl, 0x0C, 0xC0FFEE01)                 # mii id -> feeds the CCM nonce
+    struct.pack_into('<I', cfl, 0x0C, 0xC0FFEE01)
     cfl[0x10:0x16] = bytes.fromhex('ba ae 6e 00 11 22'.replace(' ', ''))
     n = "Linux".encode('utf-16-le'); cfl[0x1A:0x1A + len(n)] = n
     a = "LinuxPass".encode('utf-16-le'); cfl[0x48:0x48 + len(a)] = a
     cfl = sp_mii.reseal_cfl(bytes(cfl))
     cont = bytearray(0xA0)
     cont[0:4] = sp_mii.MAGIC_CFPB
-    struct.pack_into('<I', cont, 0x04, 1)                         # version
-    struct.pack_into('<H', cont, 0x14, 1)                         # entry count
+    struct.pack_into('<I', cont, 0x04, 1)
+    struct.pack_into('<H', cont, 0x14, 1)
     cont[0x18:0x18 + 0x70] = sp_mii.wrap_entry(cfl)
     body[0x36BC:0x375C] = bytes(cont)
-    struct.pack_into('<I', body, 0x375C, 0x00010002)              # address code
+    struct.pack_into('<I', body, 0x375C, 0x00010002)
     g = greeting.encode('utf-16-le')[:0x20]
-    body[0x3F70:0x3F70 + len(g)] = g                              # greeting, 16 chars + NUL
-    for i in range(16):                                           # country names, per language
+    body[0x3F70:0x3F70 + len(g)] = g
+    for i in range(16):
         c = f"{country}".encode('utf-16-le')[:0x3E]
         body[0x3760 + i * 0x40: 0x3760 + i * 0x40 + len(c)] = c
-    body[0x3F66] = 0x4B; body[0x3F67] = 2                         # inside the clamp bounds
+    body[0x3F66] = 0x4B; body[0x3F67] = 2
     body[0x4482] = 0x64; body[0x45D2] = 3
 
-    ex = [(4, info_text.encode('utf-16-le') + b'\0\0')]           # type 4 = InfoText
+    ex = [(4, info_text.encode('utf-16-le') + b'\0\0')]
     exblob = b''
     for t, d in ex:
         exblob += struct.pack('<II', t, len(d)) + d
-        exblob += b'\0' * ((-len(d)) % 4)                         # 4-byte align
+        exblob += b'\0' * ((-len(d)) % 4)
     hdr = bytearray(sp_cec.HDR_LEN)
     header_size = sp_cec.HDR_LEN + len(exblob)
     total = header_size + len(body) + (0x20 if with_hmac else 0)
     struct.pack_into('<I', hdr, 0x04, total)
     struct.pack_into('<I', hdr, 0x08, header_size)
     struct.pack_into('<I', hdr, 0x0C, len(body))
-    struct.pack_into('<I', hdr, 0x10, sp_cec.PLAZA_CEC_TITLE_ID)  # MakeCecTitleId(0x208,0)
+    struct.pack_into('<I', hdr, 0x10, sp_cec.PLAZA_CEC_TITLE_ID)
     struct.pack_into('<I', hdr, 0x18, 0)
-    hdr[0x34] = 3; hdr[0x35] = 0; hdr[0x6C] = 0xFF; hdr[0x6D] = 1  # what the plaza passes
+    hdr[0x34] = 3; hdr[0x35] = 0; hdr[0x6C] = 0xFF; hdr[0x6D] = 1
     return bytes(hdr) + exblob + bytes(body) + (b'\xA5' * 0x20 if with_hmac else b'')
 
 
 def mk_frame(key, payload, pn, a1, a2, a3):
-    fc = struct.pack('<H', 0x4188)                                # QoS Data, protected
+    fc = struct.pack('<H', 0x4188)
     ccmphdr = bytes([pn & 0xFF, (pn >> 8) & 0xFF, 0, 0x20, 0, 0, 0, 0])
     hdr = fc + b'\0\0' + a1 + a2 + a3 + struct.pack('<H', pn << 4) + struct.pack('<H', 0) + ccmphdr
     return sp_ccmp.encrypt(key, hdr, payload)
 
 
 def main():
-    # This whole script is synthetic, so it must run on a machine with no console dump.
     if lp_keys.selftest_keys():
         print("  (no console keys found -- running on generated throwaway keys)")
     print("=== 1. container parse (synthetic plaza message) ===")
@@ -109,9 +96,6 @@ def main():
           f"{s2} vs {complete_score}")
 
     print("\n=== 3. CCMP round-trip across fragments ===")
-    # Throwaway key material. This test is about the pipeline -- derive, encrypt, fragment,
-    # reassemble, parse -- and any well-formed key exercises it. Passing them explicitly is
-    # what lets this run on a machine with no console keys.
     TK = {'key17': b'LinuxPassSelfTest', 'keyslot_2e_normalkey': bytes(range(16))}
     cid_h = bytes.fromhex("1122334455667788"); cid_c = bytes.fromhex("99aabbccddeeff00")
     mac_h = bytes.fromhex("aabbccddeeff");     mac_c = bytes.fromhex("001122334455")
@@ -126,7 +110,6 @@ def main():
     check(m3['header']['cec_title_id'] == 0x00020800, "parses after decrypt+reassembly")
 
     print("\n=== 4. permutation search recovers a PLANTED ordering ===")
-    # Plant: host=cid_c, client=cid_h, tokens byte-reversed, MACs swapped, dev=True.
     planted = {'th': cid_c[::-1], 'tc': cid_h[::-1], 'mh': mac_c, 'mc': mac_h,
                'dev': True}
     pkey = derive_ccmp_key(planted['th'], planted['tc'], planted['mh'], planted['mc'],
@@ -142,7 +125,7 @@ def main():
                     tried += 1
                     try:
                         k = derive_ccmp_key(ta, tc, mh, mc, dev=dev, **TK)
-                        pt = sp_ccmp.decrypt(k, frame)             # raises on MIC failure
+                        pt = sp_ccmp.decrypt(k, frame)
                     except Exception:
                         continue
                     found = {'th': ta, 'tc': tc, 'mh': mh, 'mc': mc,
@@ -153,18 +136,15 @@ def main():
               "recovered combination == planted one")
         check(found['pt'] == msg[:1200], "recovered plaintext matches")
         sc, why = sp_cec.score(found['pt'])
-        # one fragment: identified as plaza (title + body_size credit) but correctly
-        # flagged incomplete, since a plaza message never fits in a single MPDU.
         check(any('0x00020800' in w for w in why), "single fragment still identifies as plaza")
         check(any('TRUNCATED' in w for w in why), "single fragment flagged incomplete", f"{sc}/90")
 
     print("\n=== 5. a stream of SEVERAL titles' messages ===")
-    # A real encounter exchanges one message per shared title. Build plaza + a non-plaza one.
     other = bytearray(sp_cec.HDR_LEN + 0x400)
-    struct.pack_into('<I', other, 0x04, len(other))       # total size
-    struct.pack_into('<I', other, 0x08, sp_cec.HDR_LEN)   # header size, no ex-headers
-    struct.pack_into('<I', other, 0x0C, 0x400)            # body size
-    struct.pack_into('<I', other, 0x10, 0x00141000)       # a different advertised title
+    struct.pack_into('<I', other, 0x04, len(other))
+    struct.pack_into('<I', other, 0x08, sp_cec.HDR_LEN)
+    struct.pack_into('<I', other, 0x0C, 0x400)
+    struct.pack_into('<I', other, 0x10, 0x00141000)
     other[0x34] = 3; other[0x35] = 0; other[0x6C] = 0xFF; other[0x6D] = 1
     stream = msg + bytes(other)
     ms = sp_cec.parse_stream(stream)
@@ -181,12 +161,12 @@ def main():
     MTU2 = 1400
     frags = [msg[i:i + MTU2] for i in range(0, len(msg), MTU2)]
     LLC = b'\xaa\xaa\x03\x00\x00\x00\x08\x00'
-    items = [(100 + i, LLC + f) for i, f in enumerate(frags)]     # per-frame LLC/SNAP
+    items = [(100 + i, LLC + f) for i, f in enumerate(frags)]
     import random
     random.seed(7)
     shuffled = items[:]
-    random.shuffle(shuffled)                                       # out-of-order capture
-    shuffled += [items[3], items[3], items[9]]                     # 802.11 retransmissions
+    random.shuffle(shuffled)
+    shuffled += [items[3], items[3], items[9]]
     blob, st = sp_cec.reassemble(shuffled)
     check(st['enc'] == 8, "LLC/SNAP detected and stripped", f"enc={st['enc']}")
     check(st['dupes'] == 3, "retransmissions dropped", f"{st['dupes']}")
@@ -194,13 +174,13 @@ def main():
     check(blob == msg, "shuffled + duplicated frames reassemble EXACTLY",
           f"{len(blob)} vs {len(msg)}")
 
-    lossy = [it for it in items if it[0] not in (105, 106)]        # sniffer missed 2 frames
+    lossy = [it for it in items if it[0] not in (105, 106)]
     blob2, st2 = sp_cec.reassemble(lossy)
     check(st2['missing'] == 2, "missing frames detected via PN gap", f"missing={st2['missing']}")
     check(blob2 != msg, "lossy reassembly differs from the original (as it must)")
 
     print("\n=== 7. container found under an unknown wrapper ===")
-    wrapped = b'\xde\xad\xbe\xef' * 7 + msg                     # 28 B of unknown outer layer
+    wrapped = b'\xde\xad\xbe\xef' * 7 + msg
     offs = sp_cec.find_container_offsets(wrapped)
     check(offs and offs[0] == 28, "container located at the right offset", f"{offs[:4]}")
     check(sp_cec.score(wrapped[offs[0]:])[0] == 90, "re-parses cleanly from that offset")

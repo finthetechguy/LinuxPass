@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""
-Full-capture report for StreetPass discovery pcaps.
-Aggregates every observable per capture file: frame census, radiotap channel/rate/RSSI,
-probe cadence, sequence stepping, vendor-IE decode, service titleID list.
-Usage: sp_report.py pcaps/*.pcap
-"""
+"""Full-capture report for StreetPass discovery pcaps."""
 import sys, os, glob
 from collections import Counter
 from scapy.all import PcapReader, Dot11, Dot11Elt, RadioTap
@@ -13,7 +8,6 @@ _sys.path.insert(0, _os.path.join(
     _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), 'linuxpass'))
 from sp_parse import parse_vendor_ie, NIN_OUI, is_laa
 
-# titleID (low u32, hex) -> retail title name, from the 12 titles the user enabled.
 TITLE_DB = {}
 
 def rt_field(pkt, name):
@@ -94,7 +88,7 @@ def report(path):
             raw = bytes(d.payload)
             action.append((d.addr2, d.addr1, raw[:1].hex(), raw[:24].hex()))
         elif d.type == 2:
-            if d.FCfield & 0x40:      # protected data frame (candidate exchange traffic)
+            if d.FCfield & 0x40:
                 prot_data.append((d.addr1, d.addr2, len(bytes(d)), bytes(d)[:48].hex()))
 
     print(f"\n[1] FRAME CENSUS  (total pcap records: {total})")
@@ -158,8 +152,6 @@ def report(path):
     else:
         print("\n[7] ACTION FRAMES: 0")
 
-    # [8] the actual exchange: protected data frames BETWEEN the console MACs (StreetPass probes use
-    # randomized/LAA MACs, so we key off the MACs seen carrying the Nintendo IE, not the OUI).
     console_set = set(sp_macs)
     def is_peer(a1, a2):
         return (a1 in console_set or a2 in console_set) or (is_laa(a1) and is_laa(a2))

@@ -1,22 +1,5 @@
 #!/usr/bin/env python3
-"""A GTK4 / libadwaita front end for LinuxPass.
-
-Runs on the same machine as the daemon and talks to its unix control socket -- the same protocol
-`sp_relay.py ctl` uses, so the GUI is a client, not a second implementation. Nothing here knows
-anything about CEC, 802.11 or the store's layout; if a thing cannot be asked for over the socket,
-it does not appear in this file.
-
-    ./sp_gui.py                       # default store, $XDG_DATA_HOME/linuxpass/store
-    ./sp_gui.py --store /path/to/store
-
-Two rules this file keeps:
-
-* **Never block the main loop.** Every socket call and every `systemctl` goes through `run_async`
-  and comes back via `GLib.idle_add`. A 100 kB transfer can hold the daemon's attention for
-  seconds, and a frozen window during an exchange would be the most visible bug in the program.
-* **Never invent state.** If the daemon cannot be reached, the UI says so and offers Start; it does
-  not show the last values it happened to have and let you believe they are current.
-"""
+"""A GTK4 / libadwaita front end for LinuxPass."""
 import os, sys, json, time, threading, subprocess, argparse
 
 import gi
@@ -24,7 +7,6 @@ gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
 from gi.repository import Gtk, Adw, GLib, Gio, Gdk        # noqa: E402
 
-# the daemon's modules live in the sibling package directory
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'linuxpass'))
 import sp_relay                                            # noqa: E402
@@ -39,30 +21,18 @@ APP_ID = 'org.linuxpass.LinuxPass'
 UNIT = 'linuxpass.service'
 REFRESH_S = 2
 
-#: The format holds 24 (MBoxList____ and the ee list both cap there). No console we have dumped
-#: enables more than 12, so 12 is the number to warn at and 24 is the number to enforce.
+# The format holds 24 titles. No console we have dumped enables more than 12.
 SOFT_TITLE_CAP = 12
 
-#: ARPHRD_IEEE80211_RADIOTAP. A monitor vif is a wireless netdev like any other, so it has to be
-#: excluded by type -- excluding the name `mon0` would miss a vif left behind under another name.
+# A monitor interface can have any name, so exclude it by type.
 ARPHRD_RADIOTAP = '803'
-#: How often the relay may present a new MAC. `Never` is the default and is honest hardware
-#: behaviour; anything else is the relay pretending to be more than one console, which is the only
-#: way a long-running relay stays reachable -- a console writes our MAC into its MacFilter when an
-#: exchange completes and never speaks to it again (measured 5-7 Sep 2026: not after 24 h, a
-#: reboot, a power-off, or a three-day jump of the console's own clock).
 ROTATE_CHOICES = ((0, 'Never'), (3600, 'Every hour'), (4 * 3600, 'Every 4 hours'),
                   (8 * 3600, 'Every 8 hours'), (12 * 3600, 'Every 12 hours'),
                   (24 * 3600, 'Every day'))
 
 
 def wireless_ifaces():
-    """-> [(name, driver)] for every real wireless adapter, monitor vifs excluded, ath9k first.
-
-    Interface names are NOT stable across reboots: this box has enumerated the same adapter as
-    both wlp3s0 and wlp4s0, and because the unit named one of them literally, the service simply
-    failed to start (6 Sep 2026). That is what this list exists to let the user correct.
-    """
+    """-> [(name, driver)] for every real wireless adapter, monitor vifs excluded, ath9k first."""
     out = []
     try:
         names = sorted(os.listdir('/sys/class/net'))
@@ -83,8 +53,7 @@ def wireless_ifaces():
         except OSError:
             drv = ''
         out.append((n, '' if drv in ('driver', '') else drv))
-    # ath9k is the only driver on this bench that can inject; an MT7902 sniffs but silently
-    # transmits nothing, which looks exactly like a dead console. Offer the one that works first.
+    # ath9k is the only tested driver that can inject.
     out.sort(key=lambda t: (t[1] != 'ath9k', t[0]))
     return out
 
@@ -121,11 +90,9 @@ class Daemon:
 
     def __init__(self, store):
         self.store = os.path.abspath(store)
-        # NOT os.path.join(store, 'relay.sock'): a deep store puts the socket elsewhere, and
-        # both ends have to agree. sp_relay owns that rule.
+        # sp_relay owns this path, because a deep store puts the socket elsewhere.
         self.sock = sp_relay.control_socket_path(self.store)
 
-    # -- the control socket ----------------------------------------------------------------
     def call(self, cmd, **kw):
         return sp_relay.send_command(self.sock, cmd, **kw)
 
@@ -136,7 +103,6 @@ class Daemon:
         except (OSError, ValueError) as e:
             return None, str(e)
 
-    # -- the service -----------------------------------------------------------------------
     @staticmethod
     def unit_state():
         try:
@@ -179,23 +145,13 @@ class Page(Adw.Bin):
         self.page = Adw.PreferencesPage()
         self.set_child(self.page)
         self._groups = []
-        #: expander rows this page built, by a stable key, so a rebuild can restore what was open
         self._expanders = {}
         self._signature = None
 
-    # -- redrawing without stamping on the user -------------------------------------------
-    #
-    # The app polls every couple of seconds. Rebuilding the widget tree each time destroys every
-    # expanded row and replaces it with a fresh collapsed one, so anything you opened snapped shut
-    # a second or two later. Two defences: skip the rebuild entirely when nothing being displayed
-    # has changed, and when it has, put back whatever was open.
+    # A rebuild collapses expanded rows, so skip it when nothing displayed has changed.
 
     def signature(self, data):
-        """A hashable summary of what this page would DRAW. Equal signature, no redraw.
-
-        Pages whose data contains a constantly-moving number normalise it to the string actually
-        shown -- a countdown rendered as '11 h 29 min' changes once a minute, not twice a second.
-        """
+        """A hashable summary of what this page would DRAW."""
         return json.dumps(data, sort_keys=True, default=str)
 
     def unchanged(self, data):
@@ -259,18 +215,13 @@ def row(title, subtitle=None, css=None):
 
 
 def first_icon(*names):
-    """-> the first of `names` the icon theme actually has, else the last one.
-
-    Icon names are not a stable API: `emblem-ok-symbolic` was in Adwaita for years and is gone in
-    4.22, where it renders as a grey missing-image box rather than failing loudly. Checking is two
-    lines and turns a silent visual bug into a graceful fallback.
-    """
+    """-> the first of `names` the icon theme actually has, else the last one."""
     try:
         theme = Gtk.IconTheme.get_for_display(Gdk.Display.get_default())
         for n in names:
             if theme.has_icon(n):
                 return n
-    except Exception:                                      # no display yet, or no theme
+    except Exception:
         pass
     return names[-1]
 
@@ -283,8 +234,6 @@ def icon_button(icon, tooltip, cb, css=None):
     b.connect('clicked', lambda *_a: cb())
     return b
 
-
-# =============================================================================================
 
 class HomePage(Page):
     def __init__(self, app):
@@ -375,12 +324,9 @@ class HomePage(Page):
     def signature(self, data):
         unit, (st, why) = data
         s = dict(st['status']) if st else {'offline': why}
-        # displayed as '3 min', so it changes once a minute, not every two seconds
         if 'uptime_s' in s:
             s['uptime_s'] = human_secs(s['uptime_s'])
-        # Same treatment, and here it matters more than tidiness: these tick every poll, and a
-        # redraw rebuilds the rotation dropdown. Left raw, the list would be torn down under the
-        # user's cursor every two seconds.
+        # These tick every poll, and a redraw rebuilds the rotation dropdown under the cursor.
         for k in ('identity_age_s', 'next_rotation_s'):
             if s.get(k) is not None:
                 s[k] = human_secs(s[k])
@@ -442,16 +388,11 @@ class HomePage(Page):
                % (held, s.get('rotations') or 0)
 
     def _rotation_row(self, s):
-        """How often the relay takes a new MAC.
-
-        The daemon applies it now and saves it for restarts. It only changes identity at a pass
-        boundary, so nothing here can interrupt an exchange in progress.
-        """
+        """How often the relay takes a new MAC."""
         cur = int(s.get('rotate_every_s') or 0)
         vals = [v for v, _ in ROTATE_CHOICES]
         labels = [l for _, l in ROTATE_CHOICES]
-        # A period set by hand in /etc/default/linuxpass has to appear, or opening this window
-        # would silently round it to one of ours.
+        # A period set by hand must appear, or opening this window would round it.
         if cur and cur not in vals:
             vals.insert(1, cur)
             labels.insert(1, 'Every %s' % human_secs(cur))
@@ -461,12 +402,8 @@ class HomePage(Page):
             sub = 'one exchange per console, ever — it blocks this MAC once it is done'
         else:
             nxt = s.get('next_rotation_s')
-            # A change is applied at a pass boundary, never mid-exchange, so "now" means "when
-            # this listening window ends" -- say that rather than showing a stuck 0 s.
             sub = ('at the end of this listening pass' if nxt == 0
                    else 'next change in %s' % human_secs(nxt)) if nxt is not None else 'on'
-            # Rotating faster than our OWN per-peer cooldown looks like it should give more
-            # exchanges and does not: the far end's MacFilter is lifted, the peer book is not.
             cd = s.get('cooldown_s') or 0
             if cd and cur < cd:
                 sub += ' — but our own %s cooldown still holds off a console we have met' \
@@ -494,8 +431,6 @@ class HomePage(Page):
                   lambda _r: self.refresh())
         return False
 
-
-# =============================================================================================
 
 class EncountersPage(Page):
     def __init__(self, app):
@@ -547,11 +482,9 @@ class EncountersPage(Page):
         self.restore_open(was_open)
 
 
-# =============================================================================================
-
 class StorePage(Page):
-    """Shared drawing for the Outbox and Inbox tabs; they differ only in box and in what you may
-    do to what they show."""
+    """Shared drawing for the Outbox and Inbox tabs; they differ only in box and in what you may do
+    to what they show."""
 
     BOX = 'outbox'
 
@@ -610,9 +543,6 @@ class OutboxPage(StorePage):
         super().__init__(app, 'Outbox', 'document-send-symbolic')
 
     def header(self, st, titles):
-        # `titles` is what this tab SHOWS (titles with outbox content); st['titles'] is everything
-        # the store registers, including titles that only ever received. Reporting the second
-        # number under a list of the first is how you get "12 titles" above four rows.
         shown, registered, cap = len(titles), len(st['titles']), st['max_titles']
         note = ('%d title(s) served, %d registered in the store, %d is the format\'s limit.'
                 % (shown, registered, cap))
@@ -661,8 +591,6 @@ class InboxPage(StorePage):
         mr.add_suffix(icon_button('user-trash-symbolic', 'Delete this received message',
                                   lambda: self.app.remove_message(t['title'], m['id'], 'inbox')))
 
-
-# =============================================================================================
 
 class DenylistPage(Page):
     def __init__(self, app):
@@ -731,8 +659,6 @@ class DenylistPage(Page):
             g.add(r)
 
 
-# =============================================================================================
-
 class LogPage(Page):
     def __init__(self, app):
         super().__init__(app, 'Log', 'utilities-terminal-symbolic')
@@ -786,8 +712,6 @@ class LogPage(Page):
         return False
 
 
-# =============================================================================================
-
 class RelayWindow(Adw.ApplicationWindow):
     def __init__(self, app, **kw):
         super().__init__(application=app, title='LinuxPass',
@@ -834,7 +758,6 @@ class RelayApp(Adw.Application):
             self.refresh_now()
         self.win.present()
 
-    # -- refresh -----------------------------------------------------------------------------
     def _tick(self):
         self.refresh_now()
         return True
@@ -846,7 +769,6 @@ class RelayApp(Adw.Application):
         if isinstance(cur, Page):
             cur.refresh()
 
-    # -- feedback ----------------------------------------------------------------------------
     def toast(self, text):
         if self.win:
             self.win.toasts.add_toast(Adw.Toast(title=text, timeout=4))
@@ -868,7 +790,6 @@ class RelayApp(Adw.Application):
             self.refresh_now()
         run_async(lambda: self.daemon.call(cmd, **kw), done)
 
-    # -- dialogs -----------------------------------------------------------------------------
     def remove_message(self, title, mid, box):
         d = Adw.AlertDialog(heading='Delete this message?',
                             body='%s from the %s of %s.\n\nThis cannot be undone.'

@@ -1,28 +1,7 @@
 #!/usr/bin/env python3
-"""Radio-time analysis of a relay pcap: when was the console actually listening?
-
-Written to answer one question that the run log cannot: a StreetPass exchange with a console that
-is AWAKE behaves differently from one with a console in sleep mode, and the run log only records
-what our own state machine noticed. The pcap records the air.
-
-What it measures, per console MAC:
-
-  * PRESENCE WINDOWS -- runs of frames from that console separated by more than `--gap` seconds.
-    A console in sleep mode polls on a steady cadence; a console that is awake gets the radio in
-    slices, and a slice that ends in the middle of our transfer is exactly the failure we are
-    chasing. The window list is the direct measurement of how long we have to work with.
-  * RETRIES -- the 802.11 retry bit on frames from the console. A frame it had to repeat is a
-    frame we did not acknowledge in time, which is the loss rate that drives everything else.
-  * RATES -- radiotap rate / MCS. Ours are all 1 Mbps DSSS; the console's bulk is OFDM. The
-    ratio is how much of the exchange is our airtime rather than its.
-  * CHANNEL -- read off radiotap, never assumed. An active monitor vif reports no channel through
-    `iw`, so a measured value is the only honest one (see sp_link.detect_channel).
-
-Usage:  sp_airtime.py FILE.pcap [FILE.pcap ...] [--gap 0.5] [--mac AA:BB:..] [--json]
-"""
+"""Radio-time analysis of a relay pcap: when was the console actually listening?"""
 import sys, struct, json, argparse
 
-# radiotap "present" bit -> (size, align) for the fields we care about, in order.
 _RT_FIELDS = [(8, 8), (1, 1), (1, 1), (4, 2), (2, 2), (1, 1), (1, 1), (2, 2), (2, 2), (2, 2),
               (1, 1), (1, 1), (1, 1), (1, 1), (2, 2), (2, 2), (2, 2), (1, 1), (3, 1), (8, 4)]
 TSFT, FLAGS, RATE, CHANNEL, FHSS, DBM_ANT, DBM_NOISE, LOCK, TX_ATT, DB_TX_ATT, DBM_TX, \
@@ -62,16 +41,14 @@ def read_pcap(path):
 
 
 def radiotap(buf):
-    """-> dict of the radiotap fields we use, or None. Walks the present-bitmap properly:
-    guessing a fixed header layout silently mis-reads rate and retry on any capture whose
-    driver presents a different field set."""
+    """-> dict of the radiotap fields we use, or None."""
     if len(buf) < 8:
         return None
     _ver, _pad, length, present = struct.unpack_from('<BBHI', buf, 0)
     if length < 8 or length > len(buf):
         return None
     off, presents = 4, [present]
-    while presents[-1] & (1 << 31):                 # extended bitmaps
+    while presents[-1] & (1 << 31):
         off += 4
         if off + 4 > length:
             return None
@@ -209,7 +186,6 @@ def _selftest():
         ok += bool(c)
         print('  [%s] %s%s' % ('PASS' if c else 'FAIL', n, ('  %s' % (g,)) if g else ''))
 
-    # radiotap with TSFT+FLAGS+RATE+CHANNEL+DBM: the alignment rules are what this must get right
     present = (1 << TSFT) | (1 << FLAGS) | (1 << RATE) | (1 << CHANNEL) | (1 << DBM_ANT)
     body = struct.pack('<Q', 12345) + bytes([0x10]) + bytes([2 * 54]) \
         + struct.pack('<HH', 2412, 0x00C0) + struct.pack('<b', -42)
@@ -222,12 +198,10 @@ def _selftest():
     chk('2484 MHz is channel 14', freq_to_chan(2484) == 14)
     chk('2437 MHz is channel 6', freq_to_chan(2437) == 6)
 
-    # an unknown/extended present bitmap must not throw
     ext = struct.pack('<BBHII', 0, 0, 12, 0x80000000 | present, 0) + body
     chk('an extended present bitmap is walked, not guessed', radiotap(ext) is not None)
     chk('a truncated header is rejected', radiotap(b'\x00\x00') is None)
 
-    # retry bit and addr2
     mpdu = bytes([0x40, 0x08]) + b'\x00' * 2 + b'\xff' * 6 + bytes(range(0xA0, 0xA6)) \
         + b'\xff' * 6 + b'\x00\x00'
     _r, a2, retry, ft, sb = frame_info(rt + mpdu)
@@ -238,11 +212,10 @@ def _selftest():
         + b'\xff' * 6 + b'\x00\x00'
     chk('a non-retry frame reads as such', frame_info(rt + mpdu2)[2] is False)
 
-    # a real round trip through the pcap reader, including window splitting
     fd, path = tempfile.mkstemp(suffix='.pcap')
     with os.fdopen(fd, 'wb') as fh:
         fh.write(struct.pack('<IHHiIII', 0xA1B2C3D4, 2, 4, 0, 0, 65535, 127))
-        for t in (0.0, 0.1, 0.2, 5.0, 5.1):          # two clusters, a 4.8 s gap between
+        for t in (0.0, 0.1, 0.2, 5.0, 5.1):
             pkt = rt + mpdu
             fh.write(struct.pack('<IIII', 1788400000 + int(t), int(t % 1 * 1e6),
                                  len(pkt), len(pkt)) + pkt)

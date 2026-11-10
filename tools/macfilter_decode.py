@@ -1,24 +1,9 @@
 #!/usr/bin/env python3
-"""Decode the 3DS `data:/CEC/MacFilter___` entry format from planted known plaintext.
-
-Static analysis of cecd gave the file's size and its read/write sites but not the entry layout
-(CECD_NOTES.md). On 5 Sep 2026 a known set of entries was written into a freshly cleared 2DS
-filter by presenting the relay under chosen source MACs at recorded times -- see
-extracted/MACFILTER_PLANT.md. This reads the resulting file and recovers the layout from that
-ground truth rather than from guesswork.
-
-The method is deliberately conservative: a candidate timestamp field is accepted only if its
-deltas across entries reproduce the *recorded* deltas, which were made deliberately uneven
-(54, 55, 209, 112, 290, 331 s) so that a merely date-shaped field cannot pass by luck.
-
-    python3 macfilter_decode.py MacFilter___
-    python3 macfilter_decode.py --selftest
-"""
+"""Decode the 3DS `data:/CEC/MacFilter___` entry format from planted known plaintext."""
 import argparse
 import struct
 import sys
 
-#: The plant, from extracted/MACFILTER_PLANT.md. (source MAC, epoch when the exchange completed).
 PLANT = [
     ('ba:ae:6e:77:88:99', 1788626863.099),
     ('ba:ae:6e:c0:ff:11', 1788628155.579),
@@ -30,8 +15,6 @@ PLANT = [
     ('ba:ae:6e:c0:ff:77', 1788629206.837),
 ]
 
-#: Seconds. `when` is written at pass end, ~0.05 s after the exchange completes, so the console's
-#: own clock should track it closely; this only absorbs clock granularity.
 TOL = 10.0
 
 
@@ -44,11 +27,7 @@ def macstr(b):
 
 
 def find_entries(blob, plant=PLANT):
-    """Locate each planted MAC in `blob`. Returns (hits, order) where hits maps mac -> [offsets].
-
-    Tries the MAC forwards and reversed; a format that stores it reversed is common enough to be
-    worth ruling in or out explicitly rather than silently missing every entry.
-    """
+    """Locate each planted MAC in `blob`."""
     hits, reversed_hits = {}, {}
     for mac, _t in plant:
         mb = macbytes(mac)
@@ -73,7 +52,7 @@ def find_entries(blob, plant=PLANT):
 
 
 def infer_stride(offsets):
-    """Given sorted entry offsets, return (stride, consistent) -- the common difference if any."""
+    """Given sorted entry offsets, return (stride, consistent)."""
     if len(offsets) < 2:
         return None, False
     diffs = [b - a for a, b in zip(offsets, offsets[1:])]
@@ -81,12 +60,7 @@ def infer_stride(offsets):
 
 
 def candidate_timefields(blob, entries, stride, tol=TOL):
-    """Search every field position/width/endianness for one whose deltas match the recorded ones.
-
-    `entries` is a list of (mac, offset, epoch) in file order. Returns a list of dicts describing
-    accepted fields. Scale factors cover seconds and milliseconds; a `divisor` of 60 catches a
-    field stored at minute resolution, which would still track the uneven gaps but coarsely.
-    """
+    """Search every field position/width/endianness for one whose deltas match the recorded ones."""
     out = []
     if len(entries) < 3:
         return out
@@ -121,12 +95,7 @@ cec-macfilter-format note): +0x00 MAC, +0x06 two bytes the loader never reads, +
 
 
 def decode_header(blob):
-    """Decode the 20-byte header using the layout recovered from the 1-2 Sep dumps.
-
-    Returns a dict, or None if the file is too short. The day-of-week byte is the check that
-    matters: it is redundant with the date, so if the two agree the decode is almost certainly
-    right, and if they disagree the layout is wrong.
-    """
+    """Decode the 20-byte header using the layout recovered from the 1-2 Sep dumps."""
     if len(blob) < 20:
         return None
     mac = macstr(blob[0:6])
@@ -141,8 +110,6 @@ def decode_header(blob):
         import datetime
         dt = datetime.datetime(year, month, day, hour, minute, second)
         d['iso'] = dt.isoformat()
-        # Python: Monday=0..Sunday=6. The console's own numbering is not assumed here; both
-        # common conventions are reported so the reader can see which one fits.
         d['dow_py_mon0'] = dt.weekday()
         d['dow_sun0'] = (dt.weekday() + 1) % 7
         d['dow_consistent'] = dow in (dt.weekday(), (dt.weekday() + 1) % 7)
@@ -252,7 +219,6 @@ def report(blob, plant=PLANT, tol=TOL, out=sys.stdout):
     return found
 
 
-# --------------------------------------------------------------------------- selftest
 def _synth_header(mac, when):
     import datetime
     dt = datetime.datetime.fromtimestamp(when)
@@ -284,7 +250,6 @@ def selftest():
     def chk(name, cond):
         checks.append((name, bool(cond)))
 
-    # header decode, against a header built from the last planted exchange
     lm, lt = max(PLANT, key=lambda e: e[1])
     hb = _synth_header(lm, lt) + b'\x00' * 40
     h = decode_header(hb)
@@ -304,7 +269,6 @@ def selftest():
     chk('recovers the epoch', 'implied epoch: value 0 == 946684800' in s)
     chk('says each MAC appears once', 'exactly once' in s)
 
-    # A different layout must be recovered too, or the decoder is only fitting one shape.
     b2 = _synth(header=8, stride=24, tfield=16, fmt='>I')
     out2 = io.StringIO()
     report(b2, out=out2)
@@ -313,7 +277,6 @@ def selftest():
     chk('handles an 8-byte header', 'header is 8 bytes' in s2)
     chk('handles big-endian time', "entry+0x10  >I" in s2)
 
-    # Reversed MACs must be detected, not silently missed.
     b3 = bytearray(_synth())
     for mac, _t in PLANT:
         i = b3.find(macbytes(mac))
@@ -322,7 +285,6 @@ def selftest():
     report(bytes(b3), out=out3)
     chk('detects reversed MAC storage', 'store the MAC REVERSED' in out3.getvalue())
 
-    # Random data must NOT produce a timestamp claim.
     import random
     random.seed(1)
     b4 = bytes(random.getrandbits(8) for _ in range(1551))
@@ -330,12 +292,11 @@ def selftest():
     r4 = report(b4, out=out4)
     chk('finds nothing in random data', r4 is None and 'NONE of the planted MACs' in out4.getvalue())
 
-    # A file with the MACs but NO real timestamp must refuse to invent one.
     b5 = _synth(tfield=12, fmt='<I', epoch=0)
     b5 = bytearray(b5)
     for i in range(20, len(b5)):
         if (i - 20) % 20 >= 12:
-            b5[i] = 0x77                      # constant, so deltas are all zero
+            b5[i] = 0x77
     out5 = io.StringIO()
     report(bytes(b5), out=out5)
     chk('refuses to claim a timestamp when deltas do not match',
