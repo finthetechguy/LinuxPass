@@ -31,6 +31,7 @@ class Store:
 
     def __init__(self, root):
         self.root = os.path.abspath(root)
+        self.last_evicted = 0
         self.cec = os.path.join(self.root, 'CEC')
         os.makedirs(self.cec, mode=0o700, exist_ok=True)
         self._lock_down()
@@ -132,6 +133,9 @@ class Store:
 
     def add_title(self, tid, name=None, hmac_key=None):
         """Register a title. Idempotent; a later call may fill in a name or key."""
+        # Checked first, so a refused title leaves no directories behind.
+        if tid not in self.titles() and len(self.titles()) >= MBOXLIST_MAX:
+            raise ValueError('a store holds at most %d titles' % MBOXLIST_MAX)
         self._make_title_dirs(tid)
         if tid not in self.titles():
             ts = self.titles() + [tid]
@@ -189,12 +193,16 @@ class Store:
         h = sp_cec.parse_header(container)
         tid = h['cec_title_id']
         container = container[:h['total_size']]
+        if box == 'inbox' and len(container) > sp_cec.MAX_TOTAL:
+            raise ValueError('a CEC message is at most %d B, got %d'
+                             % (sp_cec.MAX_TOTAL, len(container)))
         if tid not in self.titles():
             self.add_title(tid, name=name, hmac_key=key)
         else:
             self._make_title_dirs(tid)
         p = os.path.join(self._box_dir(tid, box), message_filename(container))
         _write_private(p, container)
+        self.last_evicted = self._trim_inbox(tid, p) if box == 'inbox' else 0
         self._write_boxinfo(tid, box)
         if origin is not None:
             m = self._load_meta()
@@ -202,6 +210,27 @@ class Store:
                 'source': str(origin), 'when': time.time(), 'box': box}
             self._save_meta(m)
         return p
+
+    def _trim_inbox(self, tid, keep):
+        """Hold a title's inbox to the limits BoxInfo declares, dropping the oldest. -> dropped."""
+        d = self._box_dir(tid, 'inbox')
+        found = []
+        for fn in os.listdir(d):
+            p = os.path.join(d, fn)
+            if fn.startswith('_') and p != keep:
+                st = os.stat(p)
+                found.append((st.st_mtime_ns, fn, st.st_size, p))
+        found.sort()
+        count, used, dropped = len(found) + 1, os.stat(keep).st_size, 0
+        used += sum(e[2] for e in found)
+        for _t, _fn, size, p in found:
+            if count <= DEFAULT_MAX_MESSAGES and used <= DEFAULT_MAX_BYTES:
+                break
+            with open(p, 'rb') as f:
+                mid = f.read(0x28)[0x20:]
+            self.remove_message(tid, 'inbox', mid)
+            count, used, dropped = count - 1, used - size, dropped + 1
+        return dropped
 
     def messages(self, tid=None, box=None):
         """-> [(title, box, container)] for every stored message matching the filters."""
@@ -319,6 +348,40 @@ def _selftest():
         chk('a store from an older version is closed up when it is opened',
             mode(p0.cec) == 0o700 and mode(tdir) == 0o700 and mode(p0._meta_path()) == 0o600
             and mode(os.path.join(tdir, 'MBoxInfo____')) == 0o600)
+
+        lim = Store(os.path.join(tmp, 'limit'))
+        for i in range(1, DEFAULT_MAX_MESSAGES + 7):
+            lim.add_message(_synthetic(0x00030600, i), 'inbox', origin='air:test')
+            time.sleep(0.005)
+        ids = {int.from_bytes(c[0x20:0x28], 'little') for _t, _b, c in lim.messages(box='inbox')}
+        chk('an inbox stops at its message limit', len(ids) == DEFAULT_MAX_MESSAGES, len(ids))
+        chk('and the oldest messages are the ones dropped', min(ids) == 7 and max(ids) == 30, ids)
+        chk('and the last add reports what it dropped', lim.last_evicted == 1, lim.last_evicted)
+        chk('a dropped message loses its origin record too',
+            len(lim.origins()) == DEFAULT_MAX_MESSAGES)
+        lim.add_message(_synthetic(0x00030600, 30), 'inbox', origin='air:test')
+        chk('receiving the same message again drops nothing',
+            lim.last_evicted == 0 and len(lim.messages(box='inbox')) == DEFAULT_MAX_MESSAGES)
+        for i in range(1, DEFAULT_MAX_MESSAGES + 7):
+            lim.add_message(_synthetic(0x00030600, i), 'outbox')
+        chk('the outbox is not limited', len(lim.messages(box='outbox')) == DEFAULT_MAX_MESSAGES + 6)
+        big = Store(os.path.join(tmp, 'limit-bytes'))
+        for i in range(1, 13):
+            big.add_message(_synthetic(0x00030600, i, sp_cec.MAX_TOTAL), 'inbox')
+            time.sleep(0.005)
+        used = sum(len(c) for _t, _b, c in big.messages(box='inbox'))
+        chk('an inbox stops at its byte limit', used <= DEFAULT_MAX_BYTES, used)
+        chk('and still holds the newest message',
+            12 in {int.from_bytes(c[0x20:0x28], 'little') for _t, _b, c in big.messages(box='inbox')})
+        chk('an oversized message is refused for the inbox',
+            _raises(lambda: big.add_message(_synthetic(0x00030600, 99, sp_cec.MAX_TOTAL + 4), 'inbox')))
+        cap = Store(os.path.join(tmp, 'limit-titles'))
+        for i in range(MBOXLIST_MAX):
+            cap.add_message(_synthetic(0x00100000 + i, 1), 'inbox')
+        over = 0x00100000 + MBOXLIST_MAX
+        chk('a title past the store limit is refused',
+            _raises(lambda: cap.add_message(_synthetic(over, 1), 'inbox')))
+        chk('and leaves no directories behind', not os.path.exists(cap._title_dir(over)))
 
         import lp_corpus as corpus
         src = corpus.path('console_nand') or ''

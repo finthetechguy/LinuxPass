@@ -1041,10 +1041,15 @@ class Relay:
                         # Filed in the inbox with its origin, which keeps it from being offered to a console.
                         with self.lock:
                             self.store.add_message(c, 'inbox', origin='air:%s' % (peer or '?'))
+                            if self.store.last_evicted:
+                                self.log('  inbox full: dropped the %d oldest message(s) for %08X'
+                                         % (self.store.last_evicted,
+                                            sp_cec.parse_header(c)['cec_title_id']))
                         got.append(c[0x20:0x28])
                         got_detail.append({'title': '%08X' % sp_cec.parse_header(c)['cec_title_id'],
                                            'bytes': len(c)})
-                except ValueError:
+                except ValueError as e:
+                    self.log('  could not file a message from %s: %s' % (peer or '?', e))
                     continue
         if not peer:
             return False
