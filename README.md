@@ -104,8 +104,8 @@ Re-run the installer after updating your checkout, because the service runs from
 `/opt/linuxpass`.
 
 To watch it in a terminal instead, `sudo ./scripts/linuxpass` runs the same daemon in the
-foreground. When you stop it, it hands the adapter back to NetworkManager. Without NetworkManager,
-you need to bring the interface back up yourself.
+foreground. When you stop it, it hands the adapter back and brings it up again if it was up
+before.
 
 ## "It took three tries"
 

@@ -13,6 +13,7 @@ PY="$ROOT/.venv/bin/python"
 [ -x "$PY" ] || PY=$(command -v python3)
 NM_FLAG=/run/linuxpass.nm-stopped
 RUN_IFACE=/run/linuxpass.iface     # what `up` really took, so `down` restores THAT adapter
+WAS_UP=/run/linuxpass.iface-was-up  # written once, so a repeated `up` cannot lose the original state
 
 if [ "$(id -u)" -ne 0 ]; then echo "sp_monitor.sh needs root"; exit 1; fi
 for t in iw ip timeout; do command -v $t >/dev/null || { echo "install $t"; exit 1; }; done
@@ -75,6 +76,9 @@ up)
     ??:??:??:??:??:??) ;;
     *) echo "could not derive a MAC for store $STORE"; exit 1 ;;
   esac
+  case "$(ip -o link show dev "$IFACE" 2>/dev/null)" in
+    *'<UP,'*|*',UP,'*|*',UP>'*) : >"$WAS_UP" 2>/dev/null ;;
+  esac
   release_radio
   timeout 10 iw dev "$MON" del 2>/dev/null
   # `flags active` must be on the create command, or ath9k dereferences a NULL txq and oopses.
@@ -95,7 +99,14 @@ down)
   [ -r "$RUN_IFACE" ] && IFACE=$(cat "$RUN_IFACE")
   timeout 10 iw dev "$MON" del 2>/dev/null
   restore_radio
-  rm -f "$RUN_IFACE"
+  if [ -e "$WAS_UP" ] && [ -n "$IFACE" ]; then
+    if timeout 15 ip link set "$IFACE" up 2>/dev/null; then
+      echo "$IFACE brought back up"
+    else
+      echo "could not bring $IFACE back up; run: sudo ip link set $IFACE up"
+    fi
+  fi
+  rm -f "$RUN_IFACE" "$WAS_UP"
   echo "monitor $MON removed"
   ;;
 *)
