@@ -135,6 +135,15 @@ class Daemon:
             return str(e)
 
 
+def plain_row(cls, title, subtitle=None):
+    """A row that shows its text literally. Names and paths can hold `&` or `<`."""
+    r = cls(use_markup=False)
+    r.set_title(title)
+    if subtitle:
+        r.set_subtitle(subtitle)
+    return r
+
+
 class Page(Adw.Bin):
     """A tab. Subclasses fill `self.page` and implement refresh(); the app polls the visible one."""
 
@@ -172,7 +181,7 @@ class Page(Adw.Bin):
 
     def expander(self, key, **kw):
         """An ExpanderRow that survives a rebuild, identified by `key`."""
-        r = Adw.ExpanderRow(**kw)
+        r = plain_row(Adw.ExpanderRow, **kw)
         self._expanders[key] = r
         return r
 
@@ -199,14 +208,14 @@ class Page(Adw.Bin):
         self._signature = None          # so a reconnect always redraws
         self.reset()
         g = self.group('The relay is not answering')
-        r = Adw.ActionRow(title='No daemon on the control socket',
-                          subtitle='%s\n%s' % (self.app.daemon.sock, why))
+        r = plain_row(Adw.ActionRow, 'No daemon on the control socket',
+                      '%s\n%s' % (self.app.daemon.sock, why))
         r.add_css_class('dim-label')
         g.add(r)
 
 
 def row(title, subtitle=None, css=None):
-    r = Adw.ActionRow(title=title)
+    r = plain_row(Adw.ActionRow, title)
     if subtitle:
         r.set_subtitle(subtitle)
     if css:
@@ -515,8 +524,8 @@ class StorePage(Page):
             for m in ms:
                 bits = ['%s' % human_bytes(m['bytes']), 'created %s' % m['created'],
                         'send mode %d' % m['send_mode'], 'HMAC %s' % m['hmac']]
-                mr = Adw.ActionRow(title=m['origin'] or 'origin not recorded',
-                                   subtitle='   ·   '.join(bits))
+                mr = plain_row(Adw.ActionRow, m['origin'] or 'origin not recorded',
+                               '   ·   '.join(bits))
                 mr.set_title_lines(1)
                 if m['hmac'] == 'FAILED':
                     mr.add_css_class('error')
@@ -771,7 +780,7 @@ class RelayApp(Adw.Application):
 
     def toast(self, text):
         if self.win:
-            self.win.toasts.add_toast(Adw.Toast(title=text, timeout=4))
+            self.win.toasts.add_toast(Adw.Toast(title=text, timeout=4, use_markup=False))
 
     def error(self, heading, body):
         d = Adw.AlertDialog(heading=heading, body=body)
