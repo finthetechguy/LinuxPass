@@ -9,6 +9,7 @@ import sp_store, sp_cecstore, sp_cec, sp_harvest_air, sp_build
 DEFAULT_COOLDOWN = 12 * 3600.0
 CONTROL_SOCKET = 'relay.sock'
 STATE_FILE = 'relay_state.json'
+ENCOUNTERS_FILE = 'encounters.jsonl'
 # Kept apart from the peer book so a restart resumes the schedule, not the blocked fixed MAC.
 ROTATION_FILE = 'rotation.json'
 # The identity only changes between passes, and each change takes the interface down.
@@ -16,6 +17,24 @@ MIN_ROTATE_SECONDS = 60
 MAC_RE = re.compile(r'^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$')
 # `sun_path` is 108 bytes on Linux, NUL included.
 SOCK_PATH_MAX = 100
+
+
+def lock_down_store(store):
+    """Make the daemon's own files in `store` private, including ones from older versions."""
+    for path, mode in [(os.path.join(store, n), 0o600)
+                       for n in (STATE_FILE, ROTATION_FILE, ENCOUNTERS_FILE, 'relay.env')] \
+            + [(os.path.join(store, 'runs'), 0o700)]:
+        try:
+            os.chmod(path, mode)
+        except OSError:
+            pass
+
+
+def store_identity(store):
+    """A stable MAC derived from the store path, so a restart keeps the same identity."""
+    import hashlib
+    h = hashlib.sha256((sp_identity_seed() + os.path.abspath(store)).encode()).digest()
+    return 'ba:ae:6e:%02x:%02x:%02x' % (h[0], h[1], h[2])
 
 
 def control_socket_path(store):
@@ -616,10 +635,7 @@ class Relay:
         print('[%s] %s' % (time.strftime('%H:%M:%S'), msg), flush=True)
 
     def fixed_identity(self):
-        """A stable MAC derived from the store path, so a restart keeps the same identity."""
-        import hashlib
-        h = hashlib.sha256((sp_identity_seed() + os.path.abspath(self.a.store)).encode()).digest()
-        return 'ba:ae:6e:%02x:%02x:%02x' % (h[0], h[1], h[2])
+        return store_identity(self.a.store)
 
     def random_identity(self):
         """A fresh locally-administered MAC in the prefix real consoles use."""
@@ -873,7 +889,7 @@ class Relay:
         return out
 
     def encounters_path(self):
-        return os.path.join(self.a.store, 'encounters.jsonl')
+        return os.path.join(self.a.store, ENCOUNTERS_FILE)
 
     def note_encounter(self, rec, keep=500):
         """Append one line of history, so the GUI can show what happened and when."""
@@ -1707,6 +1723,21 @@ def _selftest():
             ctl.shutdown()
         chk('the socket is cleaned up on shutdown', not os.path.exists(sockp))
 
+        priv = os.path.join(tmp, 'private')
+        os.makedirs(os.path.join(priv, 'runs'))
+        for n in (STATE_FILE, ROTATION_FILE, ENCOUNTERS_FILE, 'relay.env'):
+            open(os.path.join(priv, n), 'w').close()
+            os.chmod(os.path.join(priv, n), 0o644)
+        lock_down_store(priv)
+        lock_down_store(os.path.join(tmp, 'no-such-store'))
+        chk('the daemon closes up its peer book, history, settings and run logs',
+            all(stat.S_IMODE(os.stat(os.path.join(priv, n)).st_mode) == 0o600
+                for n in (STATE_FILE, ROTATION_FILE, ENCOUNTERS_FILE, 'relay.env'))
+            and stat.S_IMODE(os.stat(os.path.join(priv, 'runs')).st_mode) == 0o700)
+        chk('the identity comes from the path alone, without creating a store',
+            bool(MAC_RE.match(store_identity(os.path.join(tmp, 'never-made'))))
+            and not os.path.exists(os.path.join(tmp, 'never-made')))
+
         shallow = control_socket_path(os.path.join(tmp, 'store'))
         chk('a normal store keeps its socket inside it',
             shallow == os.path.join(os.path.abspath(os.path.join(tmp, 'store')), CONTROL_SOCKET))
@@ -2022,18 +2053,17 @@ def main():
     a = ap.parse_args()
 
     if a.cmd == 'identity':
-        ns = argparse.Namespace(store=a.store, cooldown=DEFAULT_COOLDOWN, mac=None,
-                                rotate_identity=False, rotate_every='0',
-                                start_paused=True, iface='none',
-                                channel='1,6,11', window=1, verbose=0, idle=1, pcap=False,
-                                exchange_gap=0.0, keep_runs=50, max_iface_failures=3)
-        print(Relay(ns).identity)
+        print(store_identity(a.store))
         return 0
 
     if a.cmd in (None, 'selftest'):
         return _selftest()
     if a.cmd == 'import':
-        s = sp_store.Store(a.store)
+        try:
+            s = sp_store.Store(a.store)
+        except PermissionError:
+            print('only root can write the store at %s; re-run with sudo' % a.store)
+            return 1
         if a.from_log:
             import_from_log(s, a.path)
         else:
@@ -2048,7 +2078,11 @@ def main():
                 return 0
             except OSError:
                 print('(no daemon answering; showing the store)')
-        print(sp_store.Store(a.store).summary())
+        try:
+            print(sp_store.Store(a.store).summary())
+        except PermissionError:
+            print('only root can read the store at %s; re-run with sudo' % a.store)
+            return 1
         return 0
     if a.cmd == 'ctl':
         kw = {}
@@ -2097,6 +2131,10 @@ def main():
         print(json.dumps(send_command(control_socket_path(a.store), a.command, **kw),
                          indent=2))
         return 0
+    # Before the umask, so the desktop user can still reach the control socket inside it.
+    os.makedirs(a.store, exist_ok=True)
+    os.umask(0o077)
+    lock_down_store(a.store)
     return Relay(a).run()
 
 

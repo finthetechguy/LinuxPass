@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """A CEC message store on disk, shaped like a console's."""
-import os, json, time, struct, base64, hashlib, hmac as _hmac
+import os, json, stat, time, struct, base64, hashlib, hmac as _hmac
 
 import sp_cec
 
@@ -10,6 +10,14 @@ META_FILE = 'store_meta.json'
 MBOXLIST_HDR, MBOXLIST_ENTRY, MBOXLIST_MAX = 12, 16, 24
 BOXES = {'inbox': 'InBox___', 'outbox': 'OutBox__'}
 DEFAULT_MAX_BYTES, DEFAULT_MAX_MESSAGES = 0x100000, 24
+
+
+def _write_private(path, data):
+    """Write `data` to `path`, readable only by its owner even if the file already existed."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'wb') as f:
+        os.fchmod(f.fileno(), 0o600)
+        f.write(data)
 
 
 def message_filename(container):
@@ -24,11 +32,26 @@ class Store:
     def __init__(self, root):
         self.root = os.path.abspath(root)
         self.cec = os.path.join(self.root, 'CEC')
-        os.makedirs(self.cec, exist_ok=True)
+        os.makedirs(self.cec, mode=0o700, exist_ok=True)
+        self._lock_down()
         if not os.path.exists(self._mboxlist_path()):
             self._write_mboxlist([])
         if not os.path.exists(self._meta_path()):
             self._save_meta({'keyed_titles': ['%08x' % t for t in self.titles()], 'origins': {}})
+
+    def _lock_down(self):
+        """Close up a store written before its files were private."""
+        if stat.S_IMODE(os.stat(self.cec).st_mode) == 0o700:
+            return
+        try:
+            for d, _dirs, files in os.walk(self.cec):
+                os.chmod(d, 0o700)
+                for f in files:
+                    os.chmod(os.path.join(d, f), 0o600)
+            if os.path.exists(self._meta_path()):
+                os.chmod(self._meta_path(), 0o600)
+        except PermissionError:
+            pass
 
     def _meta_path(self):
         return os.path.join(self.root, META_FILE)
@@ -50,8 +73,7 @@ class Store:
 
     def _save_meta(self, m):
         tmp = self._meta_path() + '.tmp'
-        with open(tmp, 'w') as f:
-            json.dump(m, f, indent=1, sort_keys=True)
+        _write_private(tmp, json.dumps(m, indent=1, sort_keys=True).encode())
         os.replace(tmp, self._meta_path())
 
     @staticmethod
@@ -80,6 +102,11 @@ class Store:
     def _box_dir(self, tid, box):
         return os.path.join(self._title_dir(tid), BOXES[box])
 
+    def _make_title_dirs(self, tid):
+        os.makedirs(self._title_dir(tid), mode=0o700, exist_ok=True)
+        for box in BOXES:
+            os.makedirs(self._box_dir(tid, box), mode=0o700, exist_ok=True)
+
     def _write_mboxlist(self, titles):
         if len(titles) > MBOXLIST_MAX:
             raise ValueError('a store holds at most %d titles, got %d'
@@ -89,7 +116,7 @@ class Store:
         for i, t in enumerate(titles):
             b[MBOXLIST_HDR + i * MBOXLIST_ENTRY:
               MBOXLIST_HDR + i * MBOXLIST_ENTRY + 8] = ('%08x' % t).encode()
-        open(self._mboxlist_path(), 'wb').write(bytes(b))
+        _write_private(self._mboxlist_path(), bytes(b))
 
     def titles(self):
         d = open(self._mboxlist_path(), 'rb').read()
@@ -105,8 +132,7 @@ class Store:
 
     def add_title(self, tid, name=None, hmac_key=None):
         """Register a title. Idempotent; a later call may fill in a name or key."""
-        for box in BOXES:
-            os.makedirs(self._box_dir(tid, box), exist_ok=True)
+        self._make_title_dirs(tid)
         if tid not in self.titles():
             ts = self.titles() + [tid]
             self._write_mboxlist(ts)
@@ -124,10 +150,10 @@ class Store:
             if '%08x' % tid not in m['keyed_titles']:
                 m['keyed_titles'].append('%08x' % tid)
                 self._save_meta(m)
-        open(p, 'wb').write(bytes(info))
+        _write_private(p, bytes(info))
         if name is not None:
-            open(os.path.join(self._title_dir(tid), 'MBoxData.010'), 'wb').write(
-                name.encode('utf-16-le') + b'\x00\x00')
+            _write_private(os.path.join(self._title_dir(tid), 'MBoxData.010'),
+                           name.encode('utf-16-le') + b'\x00\x00')
         for box in BOXES:
             self._write_boxinfo(tid, box)
         return tid
@@ -154,7 +180,7 @@ class Store:
         b = bytearray(0x20)
         struct.pack_into('<HHI', b, 0, BOXINFO_MAGIC, 0, 0x20)
         struct.pack_into('<IIII', b, 8, DEFAULT_MAX_BYTES, used, DEFAULT_MAX_MESSAGES, len(msgs))
-        open(os.path.join(self._box_dir(tid, box), 'BoxInfo_____'), 'wb').write(bytes(b))
+        _write_private(os.path.join(self._box_dir(tid, box), 'BoxInfo_____'), bytes(b))
 
     def add_message(self, container, box='inbox', name=None, key=None, origin=None):
         """File one bare 0x6060 container."""
@@ -166,10 +192,9 @@ class Store:
         if tid not in self.titles():
             self.add_title(tid, name=name, hmac_key=key)
         else:
-            for box_ in BOXES:
-                os.makedirs(self._box_dir(tid, box_), exist_ok=True)
+            self._make_title_dirs(tid)
         p = os.path.join(self._box_dir(tid, box), message_filename(container))
-        open(p, 'wb').write(container)
+        _write_private(p, container)
         self._write_boxinfo(tid, box)
         if origin is not None:
             m = self._load_meta()
@@ -270,12 +295,38 @@ def _selftest():
 
     tmp = tempfile.mkdtemp()
     try:
+        def mode(p):
+            return stat.S_IMODE(os.stat(p).st_mode)
+
+        p0 = Store(os.path.join(tmp, 'private'))
+        p0.add_title(0x00020800, name='Mii Plaza', hmac_key=b'k' * 32)
+        p0.add_message(_synthetic(0x00020800, 1), 'inbox', origin='air:test')
+        tdir = p0._title_dir(0x00020800)
+        chk('the CEC tree is closed to other users', mode(p0.cec) == 0o700)
+        chk('a title directory is private', mode(tdir) == 0o700)
+        chk('a box directory is private', mode(p0._box_dir(0x00020800, 'inbox')) == 0o700)
+        chk('the file holding the HMAC key is private',
+            mode(os.path.join(tdir, 'MBoxInfo____')) == 0o600)
+        chk('MBoxList, the sidecar and BoxInfo are private',
+            {mode(p0._mboxlist_path()), mode(p0._meta_path()),
+             mode(os.path.join(p0._box_dir(0x00020800, 'inbox'), 'BoxInfo_____'))} == {0o600})
+        msg0 = [n for n in os.listdir(p0._box_dir(0x00020800, 'inbox')) if n.startswith('_')][0]
+        chk('a stored message is private',
+            mode(os.path.join(p0._box_dir(0x00020800, 'inbox'), msg0)) == 0o600)
+        os.chmod(p0.cec, 0o755); os.chmod(tdir, 0o755); os.chmod(p0._meta_path(), 0o644)
+        os.chmod(os.path.join(tdir, 'MBoxInfo____'), 0o644)
+        Store(p0.root)
+        chk('a store from an older version is closed up when it is opened',
+            mode(p0.cec) == 0o700 and mode(tdir) == 0o700 and mode(p0._meta_path()) == 0o600
+            and mode(os.path.join(tdir, 'MBoxInfo____')) == 0o600)
+
         import lp_corpus as corpus
         src = corpus.path('console_nand') or ''
         if not os.path.exists(src):
-            print('  [SKIP] the whole suite: it is entirely about importing a real console\n'
+            print('  [SKIP] the rest of the suite: it is about importing a real console\n'
                   '         save image, and none is in the corpus (%s)' % corpus.why_skipped())
-            return 0
+            print('\n%d/%d checks passed' % (ok, tot))
+            return 0 if ok == tot else 1
         fs = sp_savefs.SaveFS(open(src, 'rb').read())
         meta = sp_cecstore.title_metadata(fs)
         files = {x['path']: x for x in fs.files()}
@@ -435,6 +486,16 @@ def _selftest():
         shutil.rmtree(tmp, ignore_errors=True)
     print('\n%d/%d checks passed' % (ok, tot))
     return 0 if ok == tot else 1
+
+
+def _synthetic(tid, n, size=0x200):
+    """A bare container with just the header fields the store reads."""
+    b = bytearray(size)
+    struct.pack_into('<HH', b, 0, 0x6060, 0)
+    struct.pack_into('<III', b, 4, size, 0x70, size - 0x90)
+    struct.pack_into('<I', b, 0x10, tid)
+    b[0x20:0x28] = n.to_bytes(8, 'little')
+    return bytes(b)
 
 
 def _raises(fn):
