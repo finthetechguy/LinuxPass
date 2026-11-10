@@ -88,7 +88,7 @@ what is and is not in this repository, and why.
 ## Quick start
 
 ```sh
-git clone https://github.com/<owner>/LinuxPass && cd LinuxPass
+git clone https://github.com/finthetechguy/LinuxPass && cd LinuxPass
 python3 tools/lp_extract_keys.py --cecd /path/to/cecd/code.bin \
                                  --cec-store /path/to/your/CEC-partition.bin
 sudo ./install/install.sh install       # writes the unit, the polkit rule and a menu entry
@@ -125,7 +125,7 @@ hardware captures report `[SKIP]` and say what is missing.
 
 ## Documentation
 
-- **[Wiki](https://github.com/<owner>/LinuxPass/wiki)** — setup, hardware, first StreetPass,
+- **[Wiki](https://github.com/finthetechguy/LinuxPass/wiki)** — setup, hardware, first StreetPass,
   CLI and GUI reference, troubleshooting.
 - **[docs/SCRIPTS.md](docs/SCRIPTS.md)** — what every file in the tree is for.
 - **[docs/SETUP.md](docs/SETUP.md)** — installation in one page.

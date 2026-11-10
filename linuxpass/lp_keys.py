@@ -43,7 +43,7 @@ SYSTEM_DIR = '/etc/linuxpass'
 # console. Documented at length in streetpass_ccmp_key.py.
 SCRAMBLER_C = 0x1FF9E9AAC5FE0408024591DC5D52768A
 
-_WIKI = 'https://github.com/<owner>/LinuxPass/wiki/Getting-your-keys'
+_WIKI = 'https://github.com/finthetechguy/LinuxPass/wiki/Getting-your-keys'
 
 
 class MissingKey(Exception):

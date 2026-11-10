@@ -1,6 +1,6 @@
 [Unit]
 Description=LinuxPass -- StreetPass a Nintendo 3DS from Linux
-Documentation=https://github.com/<owner>/LinuxPass/wiki
+Documentation=https://github.com/finthetechguy/LinuxPass/wiki
 After=network.target
 Wants=network.target
 
