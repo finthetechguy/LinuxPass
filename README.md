@@ -14,10 +14,10 @@ protocol reconstruction behind it is recent, and a first StreetPass usually take
 one attempt (see below — that is normal, not a bug).
 
 **Working from end-to-end**
-- Real 3DS recieves CEC (StreetPass) data from Linux
+- Real 3DS receives CEC (StreetPass) data from Linux
   - Notification LED blinks green - successful
-  - Invidual title data shown in Notifications applet
-- Linux recieves CEC data from 3DS
+  - Individual title data shown in Notifications applet
+- Linux receives CEC data from 3DS
   - Saved on disk
   - Shown in GUI ('Inbox' tab)
 
@@ -43,7 +43,7 @@ one attempt (see below — that is normal, not a bug).
 |---|---|
 | **Radio** | An **ath9k** card that supports *active* monitor mode. This is a requirement, not a preference. |
 | **Known not to work** | MT7902 — it will not inject at all. |
-| **Console** | Any 3DS-family console: 3DS, 3DS XL, 2DS, New 3DS, New 2DS XL. Retail firmware is fine. |
+| **Console** | Any 3DS-family console: 3DS, 3DS XL, 2DS, New 3DS, New 2DS XL. Exchanging needs no homebrew, but dumping the keys needs GodMode9, which needs boot9strap. |
 
 Active monitor mode matters because the card must send hardware ACKs for the console's frames.
 Without them the console gives up mid-handshake. The wiki page *Hardware* has the details,
@@ -66,7 +66,7 @@ Optional:
 
 ## You must supply your own keys
 
-LinuxPass ships **no key material**, and it cannot work without some. The protocol is
+LinuxPass ships **no console keys**, and it cannot work without them. The protocol is
 authenticated and encrypted with keys that live on the console, so you supply them from
 hardware you own. This is the first thing to sort out, not a surprise for later.
 
@@ -75,6 +75,9 @@ You will need two files in `~/.config/linuxpass/`:
 - **`aes_keys.txt`** — AES keyslots, dumped with GodMode9 on your own console.
 - **`linuxpass.keys`** — two constants read out of your own dumps, written for you by
   `tools/lp_extract_keys.py`.
+
+The installer copies them to `/etc/linuxpass/`, where the service looks for them. It does not
+replace copies already there, so if you dump new ones, copy them across yourself.
 
 Check what LinuxPass can currently see:
 
@@ -89,15 +92,21 @@ what is and is not in this repository, and why.
 
 ```sh
 git clone https://github.com/finthetechguy/LinuxPass && cd LinuxPass
+mkdir -p ~/.config/linuxpass
+install -m 600 /path/to/aes_keys.txt ~/.config/linuxpass/
 python3 tools/lp_extract_keys.py --cecd /path/to/cecd/code.bin \
                                  --cec-store /path/to/your/CEC-partition.bin
-sudo ./install/install.sh install       # writes the unit, the polkit rule and a menu entry
+sudo ./install/install.sh install       # copies the code to /opt/linuxpass, writes the unit, polkit rule and menu entry
 sudo systemctl start linuxpass
 journalctl -u linuxpass -f              # then walk a 3DS past the machine
 ```
 
+Re-run the installer after updating your checkout, because the service runs from the copy in
+`/opt/linuxpass`.
+
 Prefer to watch it rather than run it as a service? `sudo ./scripts/linuxpass` runs the same
-daemon in the foreground and puts your networking back when you stop it.
+daemon in the foreground. When you stop it, it hands the adapter back to NetworkManager. Without
+NetworkManager, you need to bring the interface back up yourself.
 
 ## "It took three tries"
 
@@ -107,8 +116,9 @@ after an aborted attempt and has to be nudged into rescanning, which LinuxPass d
 automatically. If the first pass does nothing, leave it running.
 
 The other rule worth knowing before you file a bug: **a console will exchange with a given
-peer address once**. It records who it has met and declines a second time. LinuxPass rotates
-its own identity to work around this — see the wiki page *The MAC filter*.
+peer address once**. It records who it has met and declines a second time. LinuxPass can rotate
+its own address to work around this, but rotation is off by default. See the wiki page
+*The MAC filter*.
 
 ## Self-tests
 
@@ -133,9 +143,9 @@ hardware captures report `[SKIP]` and say what is missing.
 
 ## Legal and ethical notes
 
-This is clean-room interoperability work: the protocol was reconstructed by observation and
-analysis, and reimplemented. No Nintendo code, keys or assets are included — see
-[NOTICE.md](NOTICE.md).
+LinuxPass is an independent reimplementation built through reverse engineering. It includes no
+copied Nintendo code, console keyslots, retail HMAC keys or assets. See [NOTICE.md](NOTICE.md)
+for the details, including two fixed values that do appear in the source.
 
 Use it with your own consoles and with people who know what you are doing. A StreetPass
 exchange carries real people's Mii names and greetings; treat what you receive as their data,

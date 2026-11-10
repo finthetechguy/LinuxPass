@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "linuxpass"
 version = "0.1.0"
-description = "StreetPass a Nintendo 3DS from Linux, with your own data, over your own radio"
+description = "StreetPass a Nintendo 3DS from a Linux device, with your own data"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }

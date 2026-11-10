@@ -1,8 +1,8 @@
 # tests/
 
 `tests/corpus/` is where you put your own captures and console dumps if you want to run the
-self-tests' hardware regressions. It is git-ignored, and CI fails the build if anything in it
-is ever tracked.
+self-tests' hardware regressions. It is git-ignored, and CI fails the build if a capture or
+dump file type is tracked anywhere in the repository.
 
 See the wiki page *Running the self-tests* for the `manifest.json` and `vectors.json` shapes.
 
