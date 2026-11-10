@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """LinuxPass: a daemon that exchanges with any 3DS that passes."""
-import os, sys, json, time, socket, stat, struct, threading, random, argparse, re, pwd
+import contextlib, os, sys, json, time, socket, stat, struct, threading, random, argparse, re, pwd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sp_store, sp_cecstore, sp_cec, sp_harvest_air, sp_build
@@ -38,14 +38,21 @@ def store_identity(store):
 
 
 def control_socket_path(store):
-    """-> where this store's control socket lives."""
-    p = os.path.join(os.path.abspath(store), CONTROL_SOCKET)
-    if len(p.encode()) <= SOCK_PATH_MAX:
-        return p
-    import hashlib
-    h = hashlib.sha256(os.path.abspath(store).encode()).hexdigest()[:16]
-    base = os.environ.get('XDG_RUNTIME_DIR') or '/tmp'
-    return os.path.join(base, 'linuxpass-%s.sock' % h)
+    """-> where this store's control socket lives, which depends only on the store."""
+    return os.path.join(os.path.abspath(store), CONTROL_SOCKET)
+
+
+@contextlib.contextmanager
+def socket_address(path):
+    """Yield an address for `path` that fits sun_path, going through /proc if it is too long."""
+    if len(path.encode()) <= SOCK_PATH_MAX:
+        yield path
+        return
+    fd = os.open(os.path.dirname(path), os.O_PATH | os.O_DIRECTORY)
+    try:
+        yield '/proc/self/fd/%d/%s' % (fd, os.path.basename(path))
+    finally:
+        os.close(fd)
 
 
 def sp_identity_seed():
@@ -529,7 +536,8 @@ class Control:
             if os.path.exists(self.path):
                 os.remove(self.path)
             self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            self.sock.bind(self.path)
+            with socket_address(self.path) as addr:
+                self.sock.bind(addr)
         except OSError as e:
             self.failed = '%s: %s' % (type(e).__name__, e)
             self.relay.log('  CONTROL SOCKET UNAVAILABLE at %s -- %s' % (self.path, self.failed))
@@ -592,7 +600,8 @@ def send_command(sock_path, cmd, **kw):
     """-> the daemon's reply dict."""
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.settimeout(5.0)
-    s.connect(sock_path)
+    with socket_address(sock_path) as addr:
+        s.connect(addr)
     s.sendall((json.dumps(dict(cmd=cmd, **kw)) + '\n').encode())
     buf = b''
     while not buf.endswith(b'\n'):
@@ -1748,12 +1757,16 @@ def _selftest():
             shallow == os.path.join(os.path.abspath(os.path.join(tmp, 'store')), CONTROL_SOCKET))
         deep = os.path.join(tmp, *(['verylongdirectoryname'] * 6), 'store')
         dp = control_socket_path(deep)
-        chk('a store too deep for sun_path gets a short path instead',
-            dp != os.path.join(deep, CONTROL_SOCKET) and len(dp.encode()) <= SOCK_PATH_MAX,
-            '%d bytes' % len(dp.encode()))
-        chk('and both ends derive the same one', control_socket_path(deep) == dp)
-        chk('different deep stores do not collide',
-            control_socket_path(deep + '2') != dp)
+        chk('a deep store keeps its socket inside it too',
+            dp == os.path.join(os.path.abspath(deep), CONTROL_SOCKET)
+            and len(dp.encode()) > SOCK_PATH_MAX, '%d bytes' % len(dp.encode()))
+        xdg = os.environ.get('XDG_RUNTIME_DIR')
+        os.environ['XDG_RUNTIME_DIR'] = '/run/user/somebody-else'
+        chk('and XDG_RUNTIME_DIR does not move it', control_socket_path(deep) == dp)
+        if xdg is None:
+            del os.environ['XDG_RUNTIME_DIR']
+        else:
+            os.environ['XDG_RUNTIME_DIR'] = xdg
         os.makedirs(deep, exist_ok=True)
         r7 = Relay(argparse.Namespace(**{**vars(args), 'store': deep}))
         c7 = Control(control_socket_path(deep), r7)
@@ -1762,6 +1775,19 @@ def _selftest():
             chk('a deep store\'s daemon really is reachable',
                 send_command(control_socket_path(deep), 'status')['ok'])
             chk('and it did not record a bind failure', c7.failed is None, c7.failed)
+            chk('and the socket file really is in the store', stat.S_ISSOCK(os.stat(dp).st_mode))
+            chk('and it is closed to other users',
+                stat.S_IMODE(os.stat(dp).st_mode) == 0o600)
+            xdg = os.environ.get('XDG_RUNTIME_DIR')
+            os.environ['XDG_RUNTIME_DIR'] = '/run/user/somebody-else'
+            try:
+                chk('a client with a different XDG_RUNTIME_DIR reaches the same daemon',
+                    send_command(control_socket_path(deep), 'status')['ok'])
+            finally:
+                if xdg is None:
+                    del os.environ['XDG_RUNTIME_DIR']
+                else:
+                    os.environ['XDG_RUNTIME_DIR'] = xdg
         finally:
             c7.shutdown()
         c8 = Control('/nonexistent-directory-for-a-test/x.sock', r7)
