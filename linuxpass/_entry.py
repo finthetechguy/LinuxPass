@@ -10,9 +10,18 @@ def relay(argv=None):
 
 
 def gui(argv=None):
-    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    sys.path.insert(0, os.path.join(here, 'gui'))
-    import sp_gui
+    # Inside the package once installed, beside it in a checkout.
+    here = os.path.dirname(os.path.abspath(__file__))
+    for d in (os.path.join(here, 'gui'), os.path.join(os.path.dirname(here), 'gui')):
+        if os.path.isfile(os.path.join(d, 'sp_gui.py')):
+            sys.path.insert(0, d)
+            break
+    try:
+        import sp_gui
+    except (ImportError, ValueError) as e:
+        print('The GUI needs PyGObject, GTK 4 and libadwaita from your distribution (%s).' % e,
+              file=sys.stderr)
+        return 1
     return sp_gui.main()
 
 

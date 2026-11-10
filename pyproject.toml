@@ -33,7 +33,10 @@ linuxpass = "linuxpass._entry:relay"
 linuxpass-gui = "linuxpass._entry:gui"
 
 [tool.setuptools]
-packages = ["linuxpass"]
+packages = ["linuxpass", "linuxpass.gui"]
+
+[tool.setuptools.package-dir]
+"linuxpass.gui" = "gui"
 
 [tool.ruff]
 line-length = 100
