@@ -47,17 +47,36 @@ disarm_deadman() {
   echo "forced reboot cancelled"
 }
 
+# Only an adapter that was up before this script ran gets brought back up.
+IFACE_WAS_UP=0
+note_iface_state() {
+  case "$(ip -o link show "$IFACE" 2>/dev/null)" in
+    *'<UP,'*|*',UP,'*|*',UP>'*) IFACE_WAS_UP=1 ;;
+  esac
+}
+restore_iface() {
+  [ "$IFACE_WAS_UP" -eq 1 ] || return 0
+  IFACE_WAS_UP=0    # INT and EXIT both run cleanup
+  if timeout 15 ip link set "$IFACE" up 2>/dev/null; then
+    echo "$IFACE brought back up"
+  else
+    echo "could not bring $IFACE back up; run: sudo ip link set $IFACE up"
+  fi
+}
+
 NM_WAS_ACTIVE=0
 cleanup() {
   echo
   echo "cleaning up..."
   timeout 10 iw dev "$MON" del 2>/dev/null
   if [ "$NM_WAS_ACTIVE" -eq 1 ]; then systemctl start NetworkManager; fi
+  restore_iface
   disarm_deadman
 }
 trap cleanup EXIT INT TERM
 
 arm_deadman
+note_iface_state
 
 if command -v systemctl >/dev/null && systemctl is-active --quiet NetworkManager; then
   NM_WAS_ACTIVE=1

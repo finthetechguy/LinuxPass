@@ -57,6 +57,25 @@ else
   echo "ath9k hardware TX counters: not available (will use netdev tx_packets instead)"
 fi
 
+# Only an adapter that was up before this script ran gets brought back up.
+IFACE_WAS_UP=0
+note_iface_state() {
+  case "$(ip -o link show "$IFACE" 2>/dev/null)" in
+    *'<UP,'*|*',UP,'*|*',UP>'*) IFACE_WAS_UP=1 ;;
+  esac
+}
+restore_iface() {
+  [ "$IFACE_WAS_UP" -eq 1 ] || return 0
+  IFACE_WAS_UP=0    # INT and EXIT both run cleanup
+  if ip link set "$IFACE" up 2>/dev/null; then
+    echo "$IFACE brought back up"
+  else
+    echo "could not bring $IFACE back up; run: sudo ip link set $IFACE up"
+  fi
+}
+
+note_iface_state
+
 NM_WAS_ACTIVE=0
 if command -v systemctl >/dev/null && systemctl is-active --quiet NetworkManager; then
   NM_WAS_ACTIVE=1
@@ -73,6 +92,7 @@ cleanup() {
     echo "restarting NetworkManager..."
     systemctl start NetworkManager
   fi
+  restore_iface
 }
 trap cleanup EXIT INT TERM
 
