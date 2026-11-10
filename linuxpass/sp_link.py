@@ -396,7 +396,7 @@ class Link:
                 if otype == 0x34 and code == 2:
                     self.log('  *** the console REFUSED title %08X. The usual cause is a send-mode '
                              'mismatch: our ee entry +0x04 must equal the message header +0x35 '
-                             '(cecd 0x1094F8 / 0x1031D0, EE_SEND_MODE.md).' % tid)
+                             '(cecd 0x1094F8 / 0x1031D0).' % tid)
         if otype == 0x32 and len(ee) >= 0x2C and ee[0:2] == b'ee':
             offered = [struct.unpack_from('<I', ee, 0x2C + i * 0x20)[0]
                        for i in range(min(struct.unpack_from('<I', ee, 8)[0],
@@ -782,7 +782,7 @@ class Link:
                             if self.session.repeat_worked else 'still never answered'))
             if st.get('gaps') or st.get('short_holds'):
                 self.log('     LOSS: %d gap(s) in peer data, %d object(s) held back rather than '
-                         'completed short -- see RANGE_AND_LOSS.md'
+                         'completed short'
                          % (st.get('gaps', 0), st.get('short_holds', 0)))
             for n, o in enumerate(self.session.received):
                 tag = ''
@@ -835,7 +835,7 @@ class Link:
                 self.log('       this source MAC, in which case it answers nothing and looks')
                 self.log('       identical. If this MAC has already completed an exchange with')
                 self.log('       that console, (b) is the one to bet on: rotate the identity or')
-                self.log('       clear the filter. See MACFILTER_PLANT.md.')
+                self.log('       clear the filter. See the wiki page The MAC filter.')
             elif not self.sightings and self.on_air:
                 self.log('    -> A CONSOLE OUI WAS ON AIR but never engaged us (see above). It was')
                 self.log('       transmitting, so this is not an absence: either it is not in')
@@ -1662,7 +1662,7 @@ def build_parser():
     ap.add_argument('--dream', type=int, metavar='N', help='card: dream (0..19)')
     ap.add_argument('--hobby', type=int, metavar='N', help='card: likes / hobby (0..27)')
     ap.add_argument('--bubble', type=int, metavar='N',
-                    help='speech-bubble style 0..5 (body+0x614C) -- INFERRED, see FROM_SCRATCH.md')
+                    help='speech-bubble style 0..5 (body+0x614C), inferred')
     ap.add_argument('--gender', type=int, metavar='N',
                     help='Mii gender 0/1 -- also selects the blue vs pink speech bubble')
     ap.add_argument('--birthday', metavar='M/D', help='Mii birthday, e.g. 8/4 (or omit for none)')
@@ -1675,7 +1675,7 @@ def build_parser():
     ap.add_argument('--title-name', metavar='NAME', help='short title name shown on the Mii card')
     ap.add_argument('--mii-name', metavar='NAME',
                     help='rewrite the sender Mii name (<=10 chars). Unwraps the CFPB CCM, edits, '
-                         'reseals the Mii CRC and re-wraps -- see CFPB_MII.md')
+                         'reseals the Mii CRC and re-wraps')
     ap.add_argument('--author-name', metavar='NAME',
                     help='rewrite the sender Mii author name (<=10 chars)')
     ap.add_argument('--greeting', default=None,
