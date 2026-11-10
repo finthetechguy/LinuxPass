@@ -223,7 +223,7 @@ class Daemon:
             err = (r.stderr or b'').decode('utf-8', 'replace').strip()
             if 'interactive authentication' in err:
                 return ('Not permitted to %s %s.\n\nInstall the polkit rule that grants it:\n'
-                        '    sudo ./install.sh install' % (verb, UNIT))
+                        '    sudo ./install/install.sh install' % (verb, UNIT))
             return err or 'systemctl %s failed (%d)' % (verb, r.returncode)
         except (OSError, subprocess.SubprocessError) as e:
             return str(e)

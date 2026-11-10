@@ -3,14 +3,16 @@
 // The GUI runs as an ordinary desktop user and needs to start and stop ONE unit. Without this,
 // `systemctl start linuxpass` from a desktop session fails with "interactive authentication
 // required" unless a polkit agent happens to be running. The alternatives are worse: a stored
-// password in an askpass helper, or a blanket sudoers line. This grants exactly one verb, on
-// exactly one unit, to exactly one user.
+// password in an askpass helper, or a blanket sudoers line. This grants start, stop and restart
+// on one unit to one user. The unit's code and settings are root-owned, so that user cannot
+// change what it runs.
 //
 // install.sh writes this file with __GUI_USER__ substituted, and `uninstall` removes it.
 // LinuxPass never writes to /etc/sudoers.d.
 polkit.addRule(function(action, subject) {
     if (action.id == "org.freedesktop.systemd1.manage-units" &&
         action.lookup("unit") == "linuxpass.service" &&
+        ["start", "stop", "restart"].indexOf(action.lookup("verb")) >= 0 &&
         subject.user == "__GUI_USER__") {
         return polkit.Result.YES;
     }

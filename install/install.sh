@@ -1,12 +1,12 @@
 #!/bin/bash
-# Install (or remove) linuxpass.service, pointed at wherever this checkout actually lives.
+# Install (or remove) linuxpass.service. The code is copied to a root-owned directory, because
+# a root service must never run files its desktop user can edit. Re-run after updating the checkout.
 #
 #   sudo ./install.sh install     # write the unit, reload, enable at boot
 #   sudo ./install.sh start|stop|restart|status|logs
 #   sudo ./install.sh uninstall   # stop, disable, remove the unit
 #
-# The unit template carries __ROOT__ / __PY__ placeholders so the paths cannot drift from the
-# checkout. /etc/default/linuxpass holds the tunables and is NOT overwritten once it exists.
+# /etc/default/linuxpass holds the tunables and is NOT overwritten once it exists.
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/.." && pwd)
@@ -15,17 +15,52 @@ DEFAULTS=/etc/default/linuxpass
 POLKIT=/etc/polkit-1/rules.d/50-linuxpass.rules
 DESKTOP=/usr/share/applications/linuxpass-gui.desktop
 KEYDIR=/etc/linuxpass
+LIB=/opt/linuxpass
+STATE=/var/lib/linuxpass
 GUI_USER=${SUDO_USER:-${GUI_USER:-}}
-PY="$ROOT/.venv/bin/python"
-[ -x "$PY" ] || PY=$(command -v python3)
+PY=$(command -v python3)
 
 need_root() { [ "$(id -u)" -eq 0 ] || { echo "needs root; re-run with sudo."; exit 1; }; }
+
+# True if only root can change this path or any directory above it.
+root_only() {
+  local p
+  p=$(readlink -m "$1")
+  while :; do
+    if [ -e "$p" ]; then
+      [ "$(stat -c %u "$p")" = 0 ] || return 1
+      case "$(stat -c %A "$p")" in ?????w????|????????w?) return 1 ;; esac
+    fi
+    [ "$p" = / ] && return 0
+    p=$(dirname "$p")
+  done
+}
+
+# Copies regular files only, so a symlink in the checkout cannot lead root back to user files.
+install_code() {
+  local d f mode
+  rm -rf "${LIB:?}/linuxpass" "${LIB:?}/gui" "${LIB:?}/scripts"
+  for d in linuxpass gui scripts; do
+    while IFS= read -r -d '' f; do
+      mode=0644
+      [ -x "$ROOT/$f" ] && mode=0755
+      install -D -o root -g root -m "$mode" "$ROOT/$f" "$LIB/$f"
+    done < <(cd "$ROOT" && find "$d" -type f ! -path '*/__pycache__/*' -print0)
+  done
+}
 
 case "${1:-}" in
 install)
   need_root
   [ -f "$HERE/linuxpass.service.in" ] || { echo "missing linuxpass.service.in"; exit 1; }
-  sed -e "s|__ROOT__|$ROOT|g" -e "s|__PY__|$PY|g" "$HERE/linuxpass.service.in" > "$UNIT"
+  if [ -z "$PY" ] || ! root_only "$PY"; then
+    echo "python3 (${PY:-not found}) can be changed by a non-root user, and the service runs as root."
+    echo "Install python3 from your distribution and re-run."
+    exit 1
+  fi
+  install_code
+  install -d -o root -g root -m 0755 "$STATE"
+  sed -e "s|__ROOT__|$LIB|g" -e "s|__PY__|$PY|g" "$HERE/linuxpass.service.in" > "$UNIT"
   chmod 0644 "$UNIT"
   if [ ! -e "$DEFAULTS" ]; then
     cat > "$DEFAULTS" <<EOF
@@ -33,7 +68,7 @@ install)
 # SP_IFACE=          # empty or unset: an adapter is picked automatically. Pin one here.
 SP_IFACE=
 SP_MON=mon0
-SP_STORE=$ROOT/relay_store
+SP_STORE=$STATE
 SP_CHANNELS=1,6,11
 SP_WINDOW=180
 SP_IDLE=2
@@ -48,7 +83,12 @@ EOF
   else
     echo "kept the existing $DEFAULTS"
   fi
-  chmod +x "$ROOT/scripts/"* "$ROOT/linuxpass/sp_relay.py" 2>/dev/null
+  STORE_PATH=$(. "$DEFAULTS" 2>/dev/null; echo "${SP_STORE:-$STATE}")
+  if ! root_only "$STORE_PATH"; then
+    echo "SP_STORE=$STORE_PATH can be changed by a non-root user, and the service writes there as root."
+    echo "Set SP_STORE in $DEFAULTS to a root-owned directory such as $STATE, then re-run."
+    exit 1
+  fi
 
   # The GUI runs as an ordinary user and needs to start and stop this ONE unit. Without this,
   # `systemctl start linuxpass` from a desktop session fails with "interactive authentication
@@ -63,10 +103,9 @@ EOF
     echo "NOTE: no polkit rule written; the GUI will need a polkit agent to start/stop the service"
   fi
 
-  # The GUI is a normal desktop app; give it a menu entry pointing at this checkout.
+  # The GUI is a normal desktop app; give it a menu entry pointing at the installed copy.
   if [ -f "$HERE/linuxpass-gui.desktop.in" ] && [ -d /usr/share/applications ]; then
-    STORE_PATH=$(. "$DEFAULTS" 2>/dev/null; echo "${SP_STORE:-$ROOT/relay_store}")
-    sed -e "s|__ROOT__|$ROOT|g" -e "s|__PY__|$PY|g" -e "s|__STORE__|$STORE_PATH|g" \
+    sed -e "s|__ROOT__|$LIB|g" -e "s|__PY__|$PY|g" -e "s|__STORE__|$STORE_PATH|g" \
         "$HERE/linuxpass-gui.desktop.in" > "$DESKTOP"
     chmod 0644 "$DESKTOP"
     command -v update-desktop-database >/dev/null && update-desktop-database -q 2>/dev/null
@@ -95,7 +134,7 @@ EOF
   systemd-analyze verify "$UNIT" 2>&1 | grep -v '^$' && echo "(verify emitted the above)"
   systemctl enable linuxpass.service
   echo
-  echo "installed. Nothing is running yet:"
+  echo "installed to $LIB. Re-run this after updating the checkout. Nothing is running yet:"
   echo "  sudo systemctl start linuxpass      # or: sudo $0 start"
   echo "  systemctl status linuxpass"
   echo "  journalctl -u linuxpass -f"
@@ -106,10 +145,11 @@ uninstall)
   need_root
   systemctl disable --now linuxpass.service 2>/dev/null
   rm -f "$UNIT" "$POLKIT" "$DESKTOP"
+  rm -rf "${LIB:?}"
   systemctl daemon-reload
   command -v update-desktop-database >/dev/null && update-desktop-database -q 2>/dev/null
-  echo "removed $UNIT, $POLKIT and $DESKTOP"
-  echo "left alone: $DEFAULTS, $KEYDIR (your keys) and the store"
+  echo "removed $UNIT, $POLKIT, $DESKTOP and $LIB"
+  echo "left alone: $DEFAULTS, $KEYDIR (your keys) and the store in $STATE"
   ;;
 start|stop|restart|status)
   need_root

@@ -1,6 +1,5 @@
 [Unit]
 Description=LinuxPass -- StreetPass a Nintendo 3DS from Linux
-Documentation=file://__ROOT__/README.md
 Documentation=https://github.com/<owner>/LinuxPass/wiki
 After=network.target
 Wants=network.target
@@ -32,7 +31,7 @@ EnvironmentFile=-/etc/default/linuxpass
 # stable across reboots. Set it here or in /etc/default/linuxpass to pin one.
 Environment=SP_IFACE=
 Environment=SP_MON=mon0
-Environment=SP_STORE=__ROOT__/relay_store
+Environment=SP_STORE=/var/lib/linuxpass
 Environment=SP_CHANNELS=1,6,11
 Environment=SP_WINDOW=180
 Environment=SP_IDLE=2
@@ -43,13 +42,8 @@ Environment=SP_IDLE=2
 # otherwise turn one bad character into an endless crash loop.
 Environment=SP_ROTATE=0
 Environment=SP_EXTRA=
-# Written by the GUI's adapter dropdown, and listed LAST on purpose. Measured on this box
-# 6 Sep 2026 with a throwaway unit: an EnvironmentFile beats a unit Environment= line for the
-# same key whichever order they appear in, and a later EnvironmentFile beats an earlier one.
-# So this file wins over both, which is what lets an unprivileged GUI re-point the daemon at a
-# different radio -- interface names are not stable, and the service failed to start entirely
-# on 6 Sep 2026 when this adapter came back as wlp4s0 instead of wlp3s0.
-EnvironmentFile=-__ROOT__/relay.env
+# Root-owned, and listed last so it wins over the settings above.
+EnvironmentFile=-/var/lib/linuxpass/relay.env
 
 # Rebuilt on every (re)start, so a restart is also the recovery for a wedged interface.
 ExecStartPre=__ROOT__/scripts/sp_monitor.sh up
