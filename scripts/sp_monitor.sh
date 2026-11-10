@@ -29,22 +29,17 @@ if [ "$(id -u)" -ne 0 ]; then echo "sp_monitor.sh needs root"; exit 1; fi
 for t in iw ip timeout; do command -v $t >/dev/null || { echo "install $t"; exit 1; }; done
 
 pick_iface() {
-  # Interface names are NOT stable. This box has enumerated the same adapter as wlp3s0 and as
-  # wlp4s0 across reboots, and because `up` treated a missing SP_IFACE as fatal, ExecStartPre
-  # failed and linuxpass.service would not start at all -- it took a reboot to get the old name
-  # back (6 Sep 2026). A missing adapter is now a substitution and a warning, never fatal.
-  #
-  # ath9k is preferred because it is the only driver on this bench that can inject; an MT7902
-  # will associate and sniff but silently transmits nothing, so picking it would look like a
-  # dead console rather than a wrong adapter.
-  local i drv first="" best=""
+  # Only ath9k is picked automatically: taking any other card would drop someone's Wi-Fi for a
+  # radio that cannot do this job. Any other driver has to be named in SP_IFACE.
+  local i drv
   for i in $(iw dev 2>/dev/null | sed -n 's/^\tInterface //p'); do
     [ "$i" = "$MON" ] && continue
-    [ -z "$first" ] && first="$i"
     drv=$(basename "$(readlink -f "/sys/class/net/$i/device/driver" 2>/dev/null)" 2>/dev/null)
-    [ "$drv" = "ath9k" ] && [ -z "$best" ] && best="$i"
+    if [ "$drv" = "ath9k" ]; then
+      echo "$i"
+      return
+    fi
   done
-  echo "${best:-$first}"
 }
 
 release_radio() {
@@ -75,13 +70,13 @@ case "$ACTION" in
 up)
   if [ -z "$IFACE" ]; then
     IFACE=$(pick_iface)
-    [ -n "$IFACE" ] || { echo "no wireless interface found; pin one with SP_IFACE="; exit 1; }
+    [ -n "$IFACE" ] || { echo "no ath9k adapter found, so no adapter was touched; name one with SP_IFACE="; exit 1; }
     echo "using $IFACE (set SP_IFACE to pin a different adapter)"
   fi
   if ! timeout 10 iw dev "$IFACE" info >/dev/null 2>&1; then
     ALT=$(pick_iface)
     if [ -z "$ALT" ]; then
-      echo "no such wireless interface: $IFACE, and no other wireless device to fall back to"
+      echo "no such wireless interface: $IFACE, and no ath9k adapter to use instead"
       iw dev | sed -n 's/^\tInterface /  /p'; exit 1
     fi
     echo "WARNING: no such wireless interface: $IFACE -- falling back to $ALT"
