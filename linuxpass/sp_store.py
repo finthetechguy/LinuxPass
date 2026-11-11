@@ -394,7 +394,8 @@ def _selftest():
         meta = sp_cecstore.title_metadata(fs)
         files = {x['path']: x for x in fs.files()}
 
-        s = Store(tmp)
+        dump_root = os.path.join(tmp, 'dump')
+        s = Store(dump_root)
         chk('a fresh store has no titles', s.titles() == [])
         chk('and its MBoxList parses as version 1, count 0',
             sp_cecstore.parse_mboxlist(open(s._mboxlist_path(), 'rb').read())
@@ -414,7 +415,7 @@ def _selftest():
             sorted(s.titles()) == sorted(t for t in meta if meta[t]['inbox'] or meta[t]['outbox']),
             len(s.titles()))
 
-        found = sp_cecstore.scan_tree(tmp)
+        found = sp_cecstore.scan_tree(dump_root)
         chk('sp_cecstore reads the store back', len(found) == n, len(found))
         chk('MBoxList round-trips through the reader',
             sorted(sp_cecstore.parse_mboxlist(open(s._mboxlist_path(), 'rb').read())['titles'])
