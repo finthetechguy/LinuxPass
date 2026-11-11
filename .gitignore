@@ -45,3 +45,5 @@ dist/
 *.swp
 .idea/
 .vscode/
+
+.wikistuff/
