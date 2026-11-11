@@ -411,7 +411,8 @@ class Control:
         if cmd == 'store':
             return {'ok': True, 'store': r.describe_store()}
         if cmd == 'encounters':
-            return {'ok': True, 'encounters': r.encounters(int(req.get('limit', 200)))}
+            return {'ok': True, 'encounters': r.encounters(int(req.get('limit', 200))),
+                    'total': r.encounter_count()}
         if cmd == 'denylist':
             now = time.time()
             return {'ok': True,
@@ -927,6 +928,13 @@ class Relay:
             except ValueError:
                 continue
         return out
+
+    def encounter_count(self):
+        try:
+            with open(self.encounters_path()) as f:
+                return sum(1 for ln in f if ln.strip())
+        except OSError:
+            return 0
 
     def _decline(self, link, reason, msg):
         """Serve this peer nothing, and make sure the reason reaches both logs."""

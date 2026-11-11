@@ -99,9 +99,13 @@ class Daemon:
     def try_call(self, cmd, **kw):
         """-> (reply, None) or (None, 'why not'). A daemon that is not running is not an error."""
         try:
-            return self.call(cmd, **kw), None
+            rep = self.call(cmd, **kw)
         except (OSError, ValueError) as e:
             return None, str(e)
+        # A daemon that is shutting down can close the socket without replying, which reads as {}.
+        if not rep.get('ok'):
+            return None, rep.get('error') or 'the daemon closed the connection without a reply'
+        return rep, None
 
     @staticmethod
     def unit_state():
@@ -457,7 +461,9 @@ class EncountersPage(Page):
         was_open = self.remember_open()
         self.reset()
         enc = list(reversed(rep['encounters']))
-        g = self.group('Encounters', '%d recorded, newest first.' % len(enc))
+        total = max(rep.get('total', len(enc)), len(enc))
+        g = self.group('Encounters', ('%d recorded, newest first.' % total) if total == len(enc)
+                       else '%d recorded; the newest %d are shown.' % (total, len(enc)))
         if not enc:
             g.add(row('Nothing yet',
                       'A console has to be in range and past its own StreetPass '
@@ -628,7 +634,8 @@ class DenylistPage(Page):
         g = self.group('Blocked consoles',
                        'LinuxPass refuses to exchange with these consoles until you unblock '
                        'them. A cooldown only delays the next exchange.')
-        b = Gtk.Button(label='Block a console…', halign=Gtk.Align.END, margin_bottom=6)
+        b = Gtk.Button(label='Block a console…', halign=Gtk.Align.END, valign=Gtk.Align.CENTER,
+                       margin_bottom=6)
         b.connect('clicked', lambda *_a: self.app.dialog_block())
         g.set_header_suffix(b)
         if not rep['blocked']:
