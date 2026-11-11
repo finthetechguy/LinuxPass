@@ -82,7 +82,9 @@ class Link:
         self.protected_seen = 0
         self.t_engaged = None
         self.pending_poll = None
-        self.linkbss_deadline = None
+        self.linkbss_giveup = None
+        self.polls = 0
+        self.t_first_poll = None
         self.log_lines = []
         self.session = None
         if getattr(a, 'forward', None):
@@ -326,6 +328,9 @@ class Link:
             self.send(sp_parse.build_action(self.src, self.peer, seq=self.next_seq()),
                       rate=11.0, noack=False, what='action cat-0x7f')
         self.pending_poll = time.time() + self.a.poll_delay
+        self.linkbss_giveup = None
+        self.polls = 0
+        self.t_first_poll = None
         self.setstate(self.REPLIED)
 
     def on_link_bss(self, f, mpdu, inf):
@@ -339,6 +344,11 @@ class Link:
         if self.state >= self.SYNSENT:
             return
         self.log('  *** LINK BSS ANNOUNCED by %s  (capability PRIVACY set)' % f['addr2'])
+        if self.polls > 1 and self.t_first_poll:
+            self.log('      it answered probe burst %d, %.0f ms after the first; a single burst '
+                     'would have missed it' % (self.polls, (time.time() - self.t_first_poll) * 1000))
+        self.pending_poll = None
+        self.linkbss_giveup = None
         self.setstate(self.LINKBSS)
         self.send_syn()
 
@@ -592,20 +602,37 @@ class Link:
 
     def pump(self, until):
         while time.time() < until:
+            # The console only answers once its link BSS is up, which can take over a second
+            # (the 2DS more often than the XL). A real console asks again; so do we.
             if self.state == self.REPLIED and self.pending_poll \
                     and time.time() >= self.pending_poll:
-                self.pending_poll = None
-                for _ in range(self.a.poll_burst):
+                now = time.time()
+                if self.t_first_poll is None:
+                    self.t_first_poll = now
+                    self.linkbss_giveup = now + max(self.a.linkbss_patience, self.a.linkbss_wait)
+                    burst = self.a.poll_burst
+                else:
+                    burst = min(2, self.a.poll_burst)
+                    if self.polls == 1:
+                        self.log('  no link-BSS probe response within %.0f ms; asking again '
+                                 'every %.0f ms for up to %.1f s'
+                                 % (self.a.linkbss_wait * 1000, self.a.linkbss_wait * 1000,
+                                    self.a.linkbss_patience))
+                self.polls += 1
+                for _ in range(burst):
                     self.send(sp_parse.build_directed_probe(self.src, self.peer,
                                                             seq=self.next_seq()),
                               rate=1.0, noack=False, what='directed probe')
-                self.linkbss_deadline = time.time() + self.a.linkbss_wait
-            if self.state == self.REPLIED and self.linkbss_deadline \
-                    and time.time() >= self.linkbss_deadline:
-                self.linkbss_deadline = None
-                self.log('  no link-BSS probe response within %.0f ms, sending SYN anyway'
-                         % (self.a.linkbss_wait * 1000))
-                self.send_syn()
+                nxt_poll = now + self.a.linkbss_wait
+                self.pending_poll = nxt_poll if nxt_poll < self.linkbss_giveup else None
+            # Sending the SYN without a link BSS never drew an answer in 41 recorded attempts,
+            # so hand the console back to its scan at once instead of spending ~15 s on it.
+            if self.state == self.REPLIED and self.linkbss_giveup \
+                    and time.time() >= self.linkbss_giveup:
+                self.log('  no link-BSS probe response after %d probe burst(s) over %.1f s; the '
+                         'console did not bring up its link, re-advertising'
+                         % (self.polls, self.a.linkbss_patience))
+                self.abandon_attempt()
 
             self.heartbeat()
             if self.session:
@@ -737,14 +764,18 @@ class Link:
                     and time.time() - self.t_engaged > self.a.attempt_timeout:
                 self.log('  attempt timed out after %.1f s in state %s, re-advertising'
                          % (self.a.attempt_timeout, self.STATE_NAME[self.state]))
-                self.setstate(self.IDLE)
-                self.t_engaged = None
-                self.pending_poll = None
-                self.linkbss_deadline = None
-                self.pn = 1
+                self.abandon_attempt()
                 nxt = 0.0
         after, _ = T.read_tx_counters(self.a.iface)
         return self.verdict(before, after, csrc)
+
+    def abandon_attempt(self):
+        """Drop the current engagement and go back to advertising."""
+        self.setstate(self.IDLE)
+        self.t_engaged = None
+        self.pending_poll = None
+        self.linkbss_giveup = None
+        self.pn = 1
 
     def verdict(self, before, after, csrc):
         self.banner('VERDICT')
@@ -848,9 +879,10 @@ class Link:
                 self.log('       --full-services, or a different --mac / --token.')
             self.log('    IDLE    : console never engaged.')
             self.log('    ENGAGED : it engaged but our action frame did not advance it.')
-            self.log('    REPLIED : action+directed probe sent, no link-BSS response. The console')
-            self.log('              may be waiting for a hardware ACK. Check that the interface')
-            self.log('              is in active monitor mode.')
+            self.log('    REPLIED : action+directed probes sent, no link-BSS response. Usually the')
+            self.log('              console chose not to connect this time and re-engages on a')
+            self.log('              later scan. If it never does, check that the interface is in')
+            self.log('              active monitor mode, since the console may want a hardware ACK.')
             self.log('    SYNSENT : our SYN went out and nothing came back, or something came back')
             self.log('              that failed the MIC. If protected frames were seen but not')
             self.log('              decrypted, the key or its ordering is wrong.')
@@ -1203,8 +1235,12 @@ def _rt(mpdu):
     return struct.pack('<BBHIBB', 0, 0, 10, (1 << 1) | (1 << 2), 0x00, 2) + mpdu
 
 
-def simulate(verbose=1, peer_hook=None, out=None):
-    """-> 0 if the state machine completes the handshake and decrypts the console's SYN|ACK."""
+def simulate(verbose=1, peer_hook=None, out=None, link_at=0.60):
+    """-> 0 if the state machine completes the handshake and decrypts the console's SYN|ACK.
+
+    The link BSS arrives after the first wait has expired, as a slow console's does. With
+    link_at=None it never arrives, and the attempt must be given up without a SYN.
+    """
     import lp_corpus as corpus
     V = corpus.vector('handshake') or {}
     CON = V.get('console_mac') or '96:58:cb:11:22:33'
@@ -1218,7 +1254,7 @@ def simulate(verbose=1, peer_hook=None, out=None):
 
     a = argparse.Namespace(
         iface='sim', channel=11, secs=8.0, probe_interval=0.25, poll_delay=0.05, poll_burst=2,
-        linkbss_wait=0.15, attempt_timeout=6.0, mac=US, token=US_TOK, full_services=False,
+        linkbss_wait=0.15, linkbss_patience=1.0, attempt_timeout=6.0, mac=US, token=US_TOK, full_services=False,
         pcap=None, pcap_all=False, log=None, verbose=verbose, reactive=False, min_gap=0.5,
         heartbeat=1e9, objects=None, dwell=6.0, yy_idle=0.4, yy_rate=11.0,
         fresh_msgid=False, fresh_consoleid=False, empty_offer=False, mirror_offer=False, full_sequence=False, greeting=None, fresh_mii=False, mii_name=None, author_name=None, from_scratch=False, forward=None, keep_msgid=False, title_id=None, title_name=None, hits=0, population=0, hat=0, pet=0, dream=0, hobby=0, birthday=None, colour=0, gender=0, bubble=0)
@@ -1256,8 +1292,10 @@ def simulate(verbose=1, peer_hook=None, out=None):
         + FOREIGN.replace(':', '') + '0020'
         + '1111111111111111' + '6400' + '1100'
         + '0004' + '54657374' + '0108' + '82848b0c12961824' + '030106')
-    L.sock = _FakeSock([(0.05, _rt(foreign)), (0.20, _rt(resp)),
-                        (0.60, _rt(link)), (0.90, _rt(synack))])
+    script = [(0.05, _rt(foreign)), (0.20, _rt(resp))]
+    if link_at is not None:
+        script += [(link_at, _rt(link)), (link_at + 0.30, _rt(synack))]
+    L.sock = _FakeSock(script)
     real_select = select.select
     select.select = lambda r, w, x, t=0: ((r if r and r[0].ready() else []), [], [])
     try:
@@ -1273,6 +1311,19 @@ def simulate(verbose=1, peer_hook=None, out=None):
         ok += bool(c)
         print('  [%s] %s%s' % ('PASS' if c else 'FAIL', n, ('  %s' % (g,)) if g else ''))
 
+    if link_at is None:
+        chk('kept asking for the link BSS', L.polls >= 3, L.polls)
+        chk('gave the attempt up within its patience, back to IDLE',
+            L.state == Link.IDLE and L.t_engaged is None, Link.STATE_NAME[L.state])
+        chk('sent no SYN without a link BSS', not L.sent.get('YY SYN'), L.sent.get('YY SYN'))
+        chk('never got past REPLIED', L.max_state == Link.REPLIED, Link.STATE_NAME[L.max_state])
+        print('\n  %d/%d simulation checks passed' % (ok, tot))
+        return 0 if ok == tot else 1
+    chk('kept asking until the late link BSS answered', L.polls >= 2, L.polls)
+    i_link = next((i for i, ln in enumerate(L.log_lines) if 'LINK BSS ANNOUNCED' in ln), None)
+    i_syn = next((i for i, ln in enumerate(L.log_lines) if 'opening the YY exchange' in ln), None)
+    chk('the SYN went out only after the link BSS',
+        i_link is not None and i_syn is not None and i_link < i_syn, (i_link, i_syn))
     if peer_hook is None:
         chk('reached DONE', L.state == Link.DONE, Link.STATE_NAME[L.state])
     else:
@@ -1602,7 +1653,11 @@ def build_parser():
     ap.add_argument('--poll-burst', type=int, default=6,
                     help='directed probes to send (the console sent 6)')
     ap.add_argument('--linkbss-wait', type=float, default=0.30,
-                    help='seconds to wait for the link-BSS probe response before sending SYN anyway')
+                    help='seconds between directed probes while waiting for the link-BSS probe '
+                         'response')
+    ap.add_argument('--linkbss-patience', type=float, default=3.0,
+                    help='seconds to keep asking for the link BSS before giving the attempt up. '
+                         'A real 2DS XL asked a 2DS twice, 1.1 s apart, before it answered')
     ap.add_argument('--attempt-timeout', type=float, default=6.0)
     ap.add_argument('--reactive', action='store_true', default=True,
                     help='answer a console probe immediately (default on)')
@@ -1715,7 +1770,9 @@ def main():
     if a.selftest:
         return selftest()
     if a.simulate:
-        return simulate(a.verbose)
+        rc = simulate(a.verbose)
+        print('\n  -- a console that never brings up its link BSS --')
+        return rc | simulate(a.verbose, link_at=None)
     if a.replay:
         return replay(a.replay)
     return Link(a).run()
