@@ -5,6 +5,8 @@ StreetPass a real Nintendo 3DS from a Linux device (with your own data)
 Walk past a 3DS with LinuxPass running and the console treats it like any other 3DS. It exchanges
 a StreetPass message, blinks its notification LED green, and exchanges title-specific data.
 
+[Skip to getting started with LinuxPass](https://github.com/finthetechguy/LinuxPass/wiki/Hardware)
+
 ## Status
 
 This is a hobby project and not a fully stable solution, I likely won't be viewing bug
