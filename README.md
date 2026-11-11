@@ -122,9 +122,6 @@ of that, while mostly every other chipset cannot.
 
 - [Wiki](https://github.com/finthetechguy/LinuxPass/wiki): setup, hardware, first StreetPass, CLI
   and GUI reference, troubleshooting.
-- [docs/SCRIPTS.md](docs/SCRIPTS.md): what every file in the tree is for.
-- [docs/SETUP.md](docs/SETUP.md): installation on one page.
-- [docs/HARDWARE.md](docs/HARDWARE.md): radios, and why active monitor mode is required.
 
 ## Legal and ethical notes
 
