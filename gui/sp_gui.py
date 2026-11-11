@@ -886,10 +886,10 @@ class RelayApp(Adw.Application):
             ab.append(sp)
         ab.append(Gtk.Label(
             xalign=0, wrap=True, css_classes=['dim-label'],
-            label='Derived from the store path and not editable: MAC %s, Mii id %08x, face %d, '
-                  "hat %d, dream %d, hobby %d. The Mii's creator MAC is the MAC this relay "
-                  'transmits from.'
-                  % (ident['mac'], ident['mii_id'], ident['face_shape'], ident['hat'],
+            label='Derived from the store path and not editable: creator MAC %s, Mii id %08x, '
+                  'face %d, hat %d, dream %d, hobby %d. Like a real console, the creator MAC '
+                  'stays the same whichever MAC this relay transmits from.'
+                  % (ident['creator_mac'], ident['mii_id'], ident['face_shape'], ident['hat'],
                      ident['dream'], ident['hobby'])))
         adv.set_child(ab)
         rows.append(adv)

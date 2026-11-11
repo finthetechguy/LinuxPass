@@ -21,6 +21,7 @@ def derive(store_path):
     return {
         'store': os.path.abspath(store_path),
         'mac': 'ba:ae:6e:%02x:%02x:%02x' % (h[0], h[1], h[2]),
+        'creator_mac': 'b8:ae:6e:%02x:%02x:%02x' % (h[0], h[1], h[2]),
         # Bit 5 of the first byte must be clear, or the plaza drops the message after the green LED.
         'mii_id': (0x90 | (h[3] & 0x0F)) | (int.from_bytes(h[4:7], 'little') << 8),
         'face_shape': h[7] % 12,
@@ -47,7 +48,7 @@ def build_message(store_path, mii_name='Relay', author_name='LinuxPass',
                          % (GREETING_MAX, len(greeting), greeting))
     ident = derive(store_path)
     mii = sp_build.build_cfl(mii_name=mii_name, author_name=author_name,
-                             mii_id=ident['mii_id'], creator_mac=ident['mac'],
+                             mii_id=ident['mii_id'], creator_mac=ident['creator_mac'],
                              face_shape=ident['face_shape'],
                              gender=ident['gender'])
     profile = sp_build.build_profile(streetpass_hits=hits, plaza_population=population,
@@ -74,9 +75,9 @@ def seed(store, store_path=None, replace=False, log=print, **kw):
                           origin='authored:%s' % os.path.basename(__file__))
     ident = derive(store_path)
     log('  filed this relay\'s own Mii Plaza message (%d B)' % len(container))
-    log('    Mii %r by %r, id %08x, created on %s'
+    log('    Mii %r by %r, id %08x, creator MAC %s'
         % (kw.get('mii_name', 'Relay'), kw.get('author_name', 'LinuxPass'),
-           ident['mii_id'], ident['mac']))
+           ident['mii_id'], ident['creator_mac']))
     return p
 
 
@@ -105,8 +106,15 @@ def _selftest():
                                 start_paused=True, iface='none', channel='1', window=1,
                                 verbose=0, idle=1, pcap=False, exchange_gap=0.0, keep_runs=50,
                                 max_iface_failures=3)
-        chk('the Mii\'s creator MAC IS the MAC the relay transmits from',
+        chk('the store\'s fixed MAC is the one the relay transmits from by default',
             sp_relay.Relay(ns).fixed_identity() == a['mac'], a['mac'])
+        cm = bytes(int(x, 16) for x in a['creator_mac'].split(':'))
+        chk('the creator MAC is a burned-in style address, as on a real console',
+            cm[:3] == b'\xb8\xae\x6e' and not cm[0] & 0x02, a['creator_mac'])
+        ns_rot = argparse.Namespace(**dict(vars(ns), mac='ba:ae:6e:44:55:66'))
+        chk('and it does not depend on the MAC the relay is on',
+            derive(sp)['creator_mac'] == a['creator_mac']
+            and sp_relay.Relay(ns_rot).identity != a['mac'], a['creator_mac'])
 
         chk('bit 5 of the Mii id\'s first byte is clear, as meet_ValidateMii demands',
             not ((a['mii_id'] & 0xFF) >> 5) & 1, '%08x' % a['mii_id'])
@@ -136,8 +144,8 @@ def _selftest():
         valid, why = sp_mii.validate_cfl(cfl)
         chk('the wrapped Mii\'s AES-CCM tag verifies', mac_ok)
         chk('and it passes meet_ValidateMii, the plaza\'s own gate', valid, why)
-        chk('the relay\'s MAC really is in the Mii\'s creator field',
-            cfl[0x10:0x16] == bytes(int(x, 16) for x in a['mac'].split(':')),
+        chk('the derived creator MAC really is in the Mii\'s creator field',
+            cfl[0x10:0x16] == cm,
             cfl[0x10:0x16].hex())
         chk('the Mii carries the name and author we asked for',
             fields.get('mii_name') == 'Relay' and fields.get('author_name') == 'LinuxPass',
