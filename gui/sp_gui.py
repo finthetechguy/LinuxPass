@@ -360,18 +360,17 @@ class HomePage(Page):
             return
         s = st['status']
 
-        g = self.group('Exchanges', 'Holds off exchanges while the service keeps running. This '
-                                    'takes effect at once and needs no privileges.')
+        g = self.group('Exchanges', 'Stops exchanges from happening while the daemon is running.')
         sw = Gtk.Switch(active=s['enabled'], valign=Gtk.Align.CENTER)
         sw.connect('state-set', self._toggle)
-        r = row('Exchange with consoles that pass',
-                'listening' if s['enabled'] else 'paused: probes still go out, nothing is served')
+        r = row('Exchange',
+                'listening' if s['enabled'] else 'paused: probes still go out but nothing is served')
         r.add_suffix(sw)
         r.set_activatable_widget(sw)
         g.add(r)
 
         g = self.group('Identity')
-        g.add(row('MAC presented on air', s['identity']))
+        g.add(row('MAC presented', s['identity']))
         g.add(row('Identity mode', self._identity_mode(s)))
         g.add(self._rotation_row(s))
         g.add(row('Store', s['store']))
@@ -412,7 +411,7 @@ class HomePage(Page):
         if s.get('rotate_identity'):
             sub = '--rotate-identity is on, which overrides this'
         elif not cur:
-            sub = 'one exchange per console, ever: it blocks this MAC once it is done'
+            sub = 'one exchange per console (it blocks this MAC once it is done)'
         else:
             nxt = s.get('next_rotation_s')
             sub = ('at the end of this listening pass' if nxt == 0
@@ -565,8 +564,8 @@ class OutboxPage(StorePage):
             note += (' No console we have dumped enables more than %d.' % SOFT_TITLE_CAP)
         g = self.group('Served to consoles', 'CEC data served to consoles. ' + note)
         box = Gtk.Box(spacing=6, halign=Gtk.Align.END, valign=Gtk.Align.CENTER, margin_bottom=6)
-        for label, cb in (('Author Mii identity…', self.app.dialog_identity),
-                          ('Import CEC data…', self.app.dialog_import)):
+        for label, cb in (('Create Mii Plaza Message', self.app.dialog_identity),
+                          ('Import CEC data', self.app.dialog_import)):
             b = Gtk.Button(label=label)
             b.connect('clicked', lambda _b, f=cb: f())
             box.append(b)
@@ -897,7 +896,7 @@ class RelayApp(Adw.Application):
 
         d = Adw.AlertDialog(
             heading='Author this relay\'s Mii Plaza identity',
-            body='Builds a Mii Plaza message without any captured data and replaces the one in '
+            body='Builds a StreetPass Mii Plaza message without any captured data and replaces the one in '
                  'the outbox.')
         d.set_extra_child(rows)
         d.add_response('cancel', 'Cancel')
@@ -919,8 +918,8 @@ class RelayApp(Adw.Application):
         rep = Adw.AlertDialog(
             heading='Import CEC data',
             body='A console save image, a mounted dump directory, or an Azahar/Citra NAND.\n\n'
-                 'Replace empties the outbox first, so this becomes the only data served. '
-                 'Without it, an import adds to what is already there.')
+                 'Replace empties the outbox then replaces it with the new CEC data. '
+                 'Otherwise, an import adds to what is already there.')
         rep.add_response('cancel', 'Cancel')
         rep.add_response('add', 'Add to outbox')
         rep.add_response('replace', 'Replace outbox')
