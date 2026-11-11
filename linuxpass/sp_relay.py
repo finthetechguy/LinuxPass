@@ -588,6 +588,20 @@ class Control:
             self.thread.join(timeout=2.0)
 
 
+def credited_objects(sess, log=print):
+    """How many of our objects the console really kept, for recording an exchange.
+
+    A console that never sent its own 0x81 list drops everything it acknowledged (no green LED),
+    and recording it would charge a 12 h cooldown for an exchange that never happened.
+    """
+    delivered = sess.stats.get('sent_objects', 0) if sess else 0
+    if delivered and not sess.peer_sent_manifest():
+        log('  the console acknowledged %d object(s) but never sent its own list, so it stored '
+            'none of them; not counting this as an exchange' % delivered)
+        return 0
+    return delivered
+
+
 def recovery_argv(a):
     """The --manifest-repeat/--repeat-type pair to hand sp_link, honouring --no-silent-recovery."""
     rep = int(getattr(a, 'manifest_repeat', 0) or 0)
@@ -1041,7 +1055,7 @@ class Relay:
         got = []
         sess = getattr(link, 'session', None)
         # Record only what was delivered, or a failed exchange would use up its messages.
-        delivered = (sess.stats.get('sent_objects', 0) if sess else 0)
+        delivered = credited_objects(sess, self.log)
         self._pending_sent = [mid for i, ids in sorted(self._pending_map.items())
                               if i < delivered for mid in ids]
         got_detail = []
@@ -1248,6 +1262,20 @@ def _selftest():
 
         book = PeerBook(os.path.join(tmp, 'peers.json'), cooldown=100.0)
         NS = argparse.Namespace
+        import sp_yysession
+
+        def _sess(types, sent):
+            s = sp_yysession.YYSession(lambda *a: True, lambda *a: None, [])
+            s.received = [b'cc\x00\x00' + struct.pack('<III', t, 0, 0) for t in types]
+            s.stats['sent_objects'] = sent
+            return s
+        quiet = []
+        chk('a silent pass (the console stopped at its 0x34) credits nothing',
+            credited_objects(_sess([0x42, 0x43, 0x12, 0x22, 0x24, 0x32, 0x34], 10),
+                             quiet.append) == 0 and quiet, quiet)
+        chk('a pass where the console sent its 0x81 credits what was delivered',
+            credited_objects(_sess([0x32, 0x34, 0x81], 10), quiet.append) == 10)
+        chk('no session credits nothing', credited_objects(None, quiet.append) == 0)
         chk('the silent-send recovery is armed by default',
             recovery_argv(NS(manifest_repeat=1, repeat_type='0xf2'))
             == ['--manifest-repeat', '1', '--repeat-type', '0xf2'])

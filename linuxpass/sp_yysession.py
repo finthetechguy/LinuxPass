@@ -86,6 +86,7 @@ class YYSession:
         self.repeat_max = 0
         self.repeats_done = 0
         self.repeat_worked = False
+        self.peer_fin = False
         self.stats = {'sent_objects': 0, 'recv_objects': 0, 'tx_frames': 0, 'rx_frames': 0,
                       'resends': 0, 'dup_tails': 0, 'syn_resends': 0, 'gaps': 0,
                       'short_holds': 0, 'manifest_repeats': 0}
@@ -159,6 +160,8 @@ class YYSession:
         self.stats['rx_frames'] += 1
         self.last_activity = time.time()
         f = y['flags']
+        if f & sp_yy.FIN:
+            self.peer_fin = True
 
         if (f & sp_yy.SYN) and not (f & sp_yy.ACK):
             self.role = 'recv'
@@ -314,6 +317,21 @@ class YYSession:
         self.repeat_slot = self.idx_tx
         self.log('  the peer answered our 0x81 with nothing; repeating a %d B object (attempt '
                  '%d of %d)' % (len(obj), self.repeats_done, self.repeat_max))
+
+    def peer_sent_manifest(self):
+        """Did the peer get far enough to store anything we sent?
+
+        cecd only accepts our messages after it has sent its own 0x81 list, and it FINs once it
+        has them all. A silent peer does neither, and drops whatever it acknowledged.
+        """
+        if self.peer_fin:
+            return True
+        for o in self.received:
+            if o[:2] == b'aa':
+                return True
+            if o[:2] == b'cc' and len(o) >= 8 and struct.unpack_from('<I', o, 4)[0] == 0x81:
+                return True
+        return False
 
     def _object_complete(self):
         """Is the object in `rx_buf` finished?"""
@@ -799,6 +817,22 @@ def _selftest():
     s17.poll()
     chk('a silent peer after some OTHER object triggers no repeat',
         s17.repeats_done == 0 and len(s17.outbox) == 3, s17.repeats_done)
+
+    # The 2DS on 11 Nov 2026: objects 0-6 back, ending at its 0x34 verdict, then nothing.
+    def cc(otype, body=b''):
+        return b'cc\x00\x00' + struct.pack('<II', otype, 0) + struct.pack('<I', len(body)) + body
+    s18 = YYSession(lambda f, sq, a, p=b'': True, lambda m, l=1: None, [man])
+    s18.received = [cc(t) for t in (0x42, 0x43, 0x12, 0x22, 0x24, 0x32, 0x34)]
+    chk('a peer that stopped at its 0x34 verdict stored nothing', not s18.peer_sent_manifest())
+    s18.received.append(cc(0x81))
+    chk('a peer that sent its 0x81 list could store our messages', s18.peer_sent_manifest())
+    s19 = YYSession(lambda f, sq, a, p=b'': True, lambda m, l=1: None, [man])
+    s19.received = [b'aa' + bytes(30)]
+    chk('a peer that sent a message got past its list', s19.peer_sent_manifest())
+    s20 = YYSession(lambda f, sq, a, p=b'': True, lambda m, l=1: None, [man])
+    s20.on_frame(sp_yy.parse(build_yy_frame(sp_yy.FIN, 0x7FDC, 0)))
+    chk('a FIN from the peer counts even if its list was missed',
+        s20.peer_fin and s20.peer_sent_manifest())
 
     print('\n%d/%d checks passed' % (ok, tot))
     return 0 if ok == tot else 1

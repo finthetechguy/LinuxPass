@@ -516,9 +516,20 @@ class Link:
         if self.session and y:
             self.session.on_frame(y)
             if self.session.done:
-                self.setstate(self.DONE)
-        else:
+                self.session_finished()
+        elif self.state == self.SYNSENT:
+            # A bare SYN with nothing queued; a late frame from an abandoned attempt is not this.
             self.setstate(self.DONE)
+
+    def session_finished(self):
+        """Every object went out. Done, unless the console was silent and so stored none of it."""
+        if self.session.peer_sent_manifest():
+            self.setstate(self.DONE)
+            return
+        self.log('  the console acknowledged our objects but never sent its own 0x81 list, so '
+                 'it stored none of them (a silent send); re-advertising so it can re-engage')
+        self.session = None
+        self.abandon_attempt()
 
     def detect_channel(self, secs=2.0):
         """The channel the radio is really on, from the radiotap of received frames."""
@@ -639,7 +650,7 @@ class Link:
                 self.session.poll(self.a.yy_idle)
                 # The session can finish inside poll(), with no incoming frame to set DONE.
                 if self.session.done and self.state != self.DONE:
-                    self.setstate(self.DONE)
+                    self.session_finished()
             if (not self.chan_locked and self.state == self.IDLE and len(self.channels) > 1
                     and time.time() >= self.next_hop):
                 self.chan_idx = (self.chan_idx + 1) % len(self.channels)
@@ -1358,6 +1369,27 @@ def simulate(verbose=1, peer_hook=None, out=None, link_at=0.60):
         chk('our SYN uses PN=1', sp_ccmp.pn_of(syn[0]) == 1, sp_ccmp.pn_of(syn[0]))
         chk('our SYN addresses the console and uses its BSSID',
             syn[0][4:10] == T.macbytes(CON) and syn[0][16:22] == T.macbytes(CON))
+    if peer_hook is None:
+        # A session that finished with the console silent must re-advertise, not end the pass.
+        class _Sess:
+            done, manifest = True, False
+
+            def peer_sent_manifest(self):
+                return self.manifest
+        L.session, L.state, L.t_engaged = _Sess(), Link.SYNSENT, time.time()
+        L.session_finished()
+        chk('a silent finish goes back to IDLE so the console can re-engage',
+            L.state == Link.IDLE and L.session is None and L.t_engaged is None,
+            Link.STATE_NAME[L.state])
+        L.on_protected(T.parse_mpdu(synack), synack)
+        chk('a late frame from the abandoned attempt does not end the pass',
+            L.state == Link.IDLE, Link.STATE_NAME[L.state])
+        ok_sess = _Sess()
+        ok_sess.manifest = True
+        L.session, L.state = ok_sess, Link.SYNSENT
+        L.session_finished()
+        chk('a finish after the console sent its list is DONE', L.state == Link.DONE,
+            Link.STATE_NAME[L.state])
     print('\n  %d/%d simulation checks passed' % (ok, tot))
     return 0 if ok == tot else 1
 
