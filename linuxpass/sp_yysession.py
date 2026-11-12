@@ -35,6 +35,13 @@ def segment(obj, window=WINDOW, max_seg=MAX_SEG):
 # YY has no SACK, so a repeated cumulative ACK is the only loss signal.
 DUP_ACK_RETRANSMIT = 2
 RETRANSMIT_AFTER = 0.75
+# cecd's main thread leaves NEGOTIATION (0x20) only on a 20 ms poll of its object mask
+# (0x101CE0). An 0x81 that lands before that poll goes to the negotiation handler 0x108B5C,
+# which answers the 0x80 bucket with set_state(0x17): the mask is zeroed (0x1027ee) and a
+# role-1 console waits in 0x20 forever. That is the silent send. Over 418 logged engagements a
+# gap of 12 ms or more between its 0x34 and our 0x81 never went silent (0 of 24), against
+# 158 of 394 below it. Wait out more than one whole poll.
+VERDICT_HOLD = 0.06
 MAX_RESENDS = 8
 MAX_OBJECT = 1 << 20
 
@@ -51,6 +58,12 @@ def object_length(buf):
     else:
         return None
     return n if 0x10 <= n <= MAX_OBJECT else None
+
+
+def is_verdict(obj):
+    """Is this the peer's 0x34 verdict, the last object it sends before its 0x81?"""
+    return (len(obj) >= 8 and obj[:2] == b'cc'
+            and struct.unpack_from('<I', obj, 4)[0] == 0x34)
 
 
 class YYSession:
@@ -87,6 +100,8 @@ class YYSession:
         self.repeats_done = 0
         self.repeat_worked = False
         self.peer_fin = False
+        self.verdict_hold = VERDICT_HOLD
+        self.send_at = None             # deferred start_send(), driven by poll()
         self.stats = {'sent_objects': 0, 'recv_objects': 0, 'tx_frames': 0, 'rx_frames': 0,
                       'resends': 0, 'dup_tails': 0, 'syn_resends': 0, 'gaps': 0,
                       'short_holds': 0, 'manifest_repeats': 0}
@@ -164,6 +179,7 @@ class YYSession:
             self.peer_fin = True
 
         if (f & sp_yy.SYN) and not (f & sp_yy.ACK):
+            self.send_at = None
             self.role = 'recv'
             self.rx_buf = bytearray()
             self.rx_expect = None
@@ -239,6 +255,12 @@ class YYSession:
                     self.rx_gap = False
                     self.role = None
                     self.idle_since = None
+                    if self.verdict_hold > 0 and is_verdict(obj):
+                        # Our next object is the 0x81; let cecd leave NEGOTIATION first.
+                        self.send_at = time.time() + self.verdict_hold
+                        self.log('  holding our next object %.0f ms so the peer can leave '
+                                 'NEGOTIATION' % (self.verdict_hold * 1000))
+                        return True
                     return self.start_send()
             return True
 
@@ -271,6 +293,11 @@ class YYSession:
         """Break the alternation deadlock when the peer has nothing to send."""
         if self.done:
             return False
+        if self.send_at is not None:
+            if time.time() < self.send_at:
+                return False
+            self.send_at = None
+            return self.start_send()
         # A SYN carries no data, so the acknowledgement backstop below cannot see it.
         if (self.role == 'send' and self.syn_at is not None
                 and time.time() - self.syn_at > RETRANSMIT_AFTER):
@@ -833,6 +860,40 @@ def _selftest():
     s20.on_frame(sp_yy.parse(build_yy_frame(sp_yy.FIN, 0x7FDC, 0)))
     chk('a FIN from the peer counts even if its list was missed',
         s20.peer_fin and s20.peer_sent_manifest())
+
+    # The silent send: hold our 0x81 after the peer's 0x34 instead of answering in ~4 ms.
+    sent21 = []
+    s21 = YYSession(lambda f, sq, a, p=b'': (sent21.append((f, sq, a, bytes(p))), True)[1],
+                    lambda m, l=1: None, [bytes(24), man])
+    s21.idx_tx = 1
+    s21.on_frame(sp_yy.parse(build_yy_frame(sp_yy.SYN, 0, 0)))
+    v = cc(0x34, bytes(8))
+    s21.on_frame(sp_yy.parse(build_yy_frame(sp_yy.ACK | sp_yy.PSH | sp_yy.URG, 0, 0, v)))
+    chk('the peer 0x34 is received', s21.received and s21.received[-1] == v)
+    chk('no SYN for our 0x81 straight after its 0x34',
+        not any(f == sp_yy.SYN for f, _s, _a, _p in sent21) and s21.send_at is not None)
+    s21.poll()
+    chk('still holding inside the hold', s21.send_at is not None
+        and not any(f == sp_yy.SYN for f, _s, _a, _p in sent21))
+    s21.send_at -= 1.0
+    s21.poll()
+    chk('poll() opens the 0x81 connection once the hold is over',
+        s21.send_at is None and sent21[-1][0] == sp_yy.SYN and s21.role == 'send')
+    sent22 = []
+    s22 = YYSession(lambda f, sq, a, p=b'': (sent22.append((f, sq, a, bytes(p))), True)[1],
+                    lambda m, l=1: None, [bytes(24), bytes(20)])
+    s22.idx_tx = 1
+    s22.on_frame(sp_yy.parse(build_yy_frame(sp_yy.SYN, 0, 0)))
+    s22.on_frame(sp_yy.parse(build_yy_frame(sp_yy.ACK | sp_yy.PSH | sp_yy.URG, 0, 0,
+                                            cc(0x32, bytes(8)))))
+    chk('other objects are still answered at once',
+        s22.send_at is None and sent22[-1][0] == sp_yy.SYN)
+    s23 = YYSession(lambda f, sq, a, p=b'': True, lambda m, l=1: None, [bytes(24), man])
+    s23.verdict_hold = 0
+    s23.idx_tx = 1
+    s23.on_frame(sp_yy.parse(build_yy_frame(sp_yy.SYN, 0, 0)))
+    s23.on_frame(sp_yy.parse(build_yy_frame(sp_yy.ACK | sp_yy.PSH | sp_yy.URG, 0, 0, v)))
+    chk('a hold of 0 restores the old behaviour', s23.send_at is None and s23.role == 'send')
 
     print('\n%d/%d checks passed' % (ok, tot))
     return 0 if ok == tot else 1
