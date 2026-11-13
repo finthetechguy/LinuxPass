@@ -9,12 +9,11 @@ a StreetPass message, blinks its notification LED green, and exchanges title-spe
 
 ## Status
 
-This is a hobby project and not a fully stable solution, I likely won't be viewing bug
+This is a hobby project and yet a completely stable solution, I likely won't be viewing bug
 reports or pull requests, if you have changes, make a fork.
 
 LinuxPass does successfully exchange against retail consoles many times, but it
-has rough edges. Only one Wi-Fi chipset is supported, and a first StreetPass usually takes 
-more than one attempt (see below).
+has rough edges. Only one Wi-Fi chipset has been tested (`ath9k`)
 
 Working end to end:
 
