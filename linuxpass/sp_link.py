@@ -307,7 +307,7 @@ class Link:
         self.peer = T.macbytes(f['addr2'])
         self.peer_token = bytes.fromhex(inf['token']) if inf.get('token') else None
         self.t_engaged = time.time()
-        self.log('  *** CONSOLE ENGAGED US: %s' % f['addr2'])
+        self.log('  *** CONSOLE ENGAGED: %s' % f['addr2'])
         self.log('      token %s   DS=ch%s   %d services'
                  % (inf.get('token'), inf.get('ds'), len(inf.get('services') or [])))
         # The broadcast probe declares everything held. From here, narrow to what this console has.
@@ -316,7 +316,7 @@ class Link:
                 picked = self.peer_hook(self, f['addr2'], inf.get('services') or [])
                 if picked:
                     self.services, self.outbox = picked
-                    self.log('      serving %d title(s), %d object(s) to this peer'
+                    self.log('      serving %d title(s), %d object(s)'
                              % (len(self.services), len(self.outbox)))
                     self.log_our_lists()
             except Exception as e:
@@ -526,7 +526,7 @@ class Link:
         if self.session.peer_sent_manifest():
             self.setstate(self.DONE)
             return
-        self.log('  the console acknowledged our objects but never sent its own 0x81 list, so '
+        self.log('  the console acknowledged objects but never sent its own 0x81 list, so '
                  'it stored none of them (a silent send); re-advertising so it can re-engage')
         self.session = None
         self.abandon_attempt()
@@ -604,7 +604,6 @@ class Link:
         elif self.on_air:
             macs = sorted(self.on_air, key=lambda m: -self.on_air[m]['n'])[:2]
             self.log('  ... state=%s  no console probes (%.0fs), but %d frame(s) from %s: '
-                     'something is on air and not engaging us'
                      % (self.STATE_NAME[self.state], now - self.t0,
                         sum(c['n'] for c in self.on_air.values()), ', '.join(macs)))
         else:
@@ -625,7 +624,7 @@ class Link:
                 else:
                     burst = min(2, self.a.poll_burst)
                     if self.polls == 1:
-                        self.log('  no link-BSS probe response within %.0f ms; asking again '
+                        self.log('  no link-BSS probe response within %.0f ms; requesting again '
                                  'every %.0f ms for up to %.1f s'
                                  % (self.a.linkbss_wait * 1000, self.a.linkbss_wait * 1000,
                                     self.a.linkbss_patience))
@@ -663,9 +662,7 @@ class Link:
                     self.channels = [self.channels[0]]
                     self.chan_idx = 0
                     self.log('  CHANNEL LOCKED to %d: this vif cannot be retuned, so the rest '
-                             'of the channel list is ignored. This is expected: the console '
-                             'sweeps channels, and every recorded engagement came in on the '
-                             'channel we were already on.'
+                             'of the channel list is ignored.'
                              % self.channels[0])
                 self.next_hop = time.time() + self.a.dwell
             r, _, _ = select.select([self.sock], [], [], 0.02)
@@ -727,7 +724,6 @@ class Link:
             self.log('  %s from %s -> %s' % (f['name'], f['addr2'], f['addr1']), 2)
 
     def run(self):
-        self.banner('STAGE 2: complete the handshake and decrypt the console')
         self.log('  interface %s  channels %s  our MAC %s'
                  % (self.a.iface, self.channels, T.macstr(self.src)))
         self.log('  our token %s   services %s'
@@ -793,7 +789,7 @@ class Link:
         self.log('  furthest state reached : %s   (%d engagement attempt(s))'
                  % (self.STATE_NAME[self.max_state], self.attempts))
         if self.declined:
-            self.log('  we offered nothing     : %s  (this pass ended by our choice, not the '
+            self.log('  offered nothing     : %s  (this pass ended by choice, not the '
                      "console's)" % self.declined)
         # `sightings` counts probe requests, which consoles may never send, so NONE proves nothing.
         if self.sightings:
@@ -801,8 +797,7 @@ class Link:
                 self.log('  console probes heard   : %s  %d probes  token=%s  over %.0fs'
                          % (m, c['n'], c['token'], c['last'] - c['first']))
         else:
-            self.log('  console probes heard   : NONE  (normal: these consoles answer our probe '
-                     'instead of sending their own, so this is not evidence of absence)')
+            self.log('  console probes heard   : NONE')
         if self.on_air:
             for m, c in sorted(self.on_air.items(), key=lambda kv: -kv[1]['n']):
                 self.log('  console OUI on air     : %s  %d frame(s) over %.0fs'
@@ -838,7 +833,7 @@ class Link:
         self.log('  ACKs to our MAC        : %d after a directed frame, %d ambient baseline'
                  % (getattr(self, 'acks_directed', 0), getattr(self, 'acks_baseline', 0)))
         if getattr(self, 'acks_baseline', 0):
-            self.log('     (a non-zero baseline means this channel has a repeater echoing us, so an')
+            self.log('     (a non-zero baseline means this channel has a repeater echoing, so an')
             self.log('      ACK alone does not prove console contact here)')
         if self.peer:
             self.log('  console                : %s  token=%s'
@@ -847,62 +842,44 @@ class Link:
         if d:
             self.log('  TX proof (%s): %s' % (csrc, {k: v for k, v in list(d.items())[:6]}))
         else:
-            self.log('  TX counters did not move, so treat negative results as unproven.')
+            self.log('  TX counters did not move, treat negative results as unproven.')
         self.log('')
         if self.decrypted:
-            self.log('  *** STAGE 2 PASS ***')
-            self.log('  We decrypted %d frame(s) the console encrypted to us, with a key derived'
+            self.log('  %d frame(s) decrypted'
                      % len(self.decrypted))
-            self.log('  independently from the two session tokens and the two MACs.')
             for pt, lbl in self.decrypted:
                 y = sp_yy.parse(pt)
                 self.log('      [%s] %s' % (lbl, sp_yy.describe(y) if y else pt.hex()))
             rc = 0
         else:
-            self.log('  Stage 2 did not complete. Where it stopped tells you what to fix:')
+            self.log('  No consoles were engaged:')
             st = self.max_state
             if st >= self.SYNSENT:
-                self.log('    -> We completed the whole sequence %d time(s): the console engaged,'
+                self.log('    -> Sequence completed %d time(s).'
                          % self.attempts)
-                self.log('       we replied, and we transmitted an encrypted YY SYN. Nothing came')
-                self.log('       back. Our directed frames were mostly not acknowledged, so the')
-                self.log('       console had stopped listening by then. It probably abandoned the')
-                self.log('       attempt because we never ACKed its probe response. Hardware has')
-                self.log('       to send that ACK: check that the interface is in active monitor')
-                self.log('       mode.')
+                self.log('       Responded to console. No response after encrypted YY SYN.')
+                self.log('       Console likely dropped connection due to not ACKing the probe response.')
+                self.log('       Check that the interface is in active monitor mode.')
             elif not self.sightings and not self.on_air:
-                self.log('    -> Nothing from a console on this channel, by either test. This')
-                self.log('       pass cannot tell two cases apart: (a) no console was transmitting,')
-                self.log('       so check it is awake, charged and has StreetPass active; or')
-                self.log('       (b) a console is there and its MacFilter is refusing')
-                self.log('       this source MAC, in which case it answers nothing and looks')
-                self.log('       identical. If this MAC has already completed an exchange with')
-                self.log('       that console, (b) is the one to bet on: rotate the identity or')
-                self.log('       clear the filter. See the wiki page The MAC filter.')
+                self.log('    -> No frames from a console on this channel.')
+                self.log('       Check that StreetPass is enabled, and this MAC has not been filtered.')
             elif not self.sightings and self.on_air:
-                self.log('    -> A console OUI was on air but never engaged us (see above). It was')
-                self.log('       transmitting, so this is not an absence: either it is not in')
-                self.log('       StreetPass at all, or its MacFilter is refusing this source MAC.')
-                self.log('       Rotate the identity to tell those apart.')
+                self.log('    -> A console OUI was on air but never engaged.')
+                self.log('       Check that StreetPass is enabled, and this MAC has not been filtered.')
             elif st == self.IDLE:
-                self.log('    -> The console was present and heard (see above) but never engaged us.')
-                self.log('       The radio path works, so look at the probe contents: try')
+                self.log('    -> A console was on air but never engaged.')
+                self.log('       Try:')
                 self.log('       --full-services, or a different --mac / --token.')
+
             self.log('    IDLE    : console never engaged.')
-            self.log('    ENGAGED : it engaged but our action frame did not advance it.')
-            self.log('    REPLIED : action+directed probes sent, no link-BSS response. Usually the')
-            self.log('              console chose not to connect this time and re-engages on a')
-            self.log('              later scan. If it never does, check that the interface is in')
-            self.log('              active monitor mode, since the console may want a hardware ACK.')
-            self.log('    SYNSENT : our SYN went out and nothing came back, or something came back')
-            self.log('              that failed the MIC. If protected frames were seen but not')
-            self.log('              decrypted, the key or its ordering is wrong.')
+            self.log('    ENGAGED : engaged but action frame did not advance it.')
+            self.log('    REPLIED : action+directed probes sent, no link-BSS response.')
             rc = 1
         if self.protected_seen and not self.decrypted:
             self.log('')
-            self.log('  NOTE: %d protected frame(s) arrived and none decrypted. That isolates the'
+            self.log('  NOTE: %d protected frame(s) arrived and none decrypted.'
                      % self.protected_seen)
-            self.log('  failure to the key derivation. The handshake itself worked.')
+            self.log('  Likely a failure in key derivation.')
         if self.pcap:
             self.pcap.close()
             self.log('')
@@ -1021,15 +998,15 @@ def edit_mii(obj5, mii_name=None, author_name=None, fresh_identity=False, log=No
                after['creator_mac'], after['crc']))
     ok, why = sp_mii.validate_cfl(cfl)
     if not ok:
-        raise ValueError('edited Mii would be rejected by the plaza: ' + '; '.join(why))
+        raise ValueError('edited Mii would be rejected by StreetPass Mii Plaza: ' + '; '.join(why))
     if log:
-        log('  MII passes the plaza gate (CRC, identity non-zero, id byte bit5 clear)')
+        log('  Mii passes the SMP checks (CRC, identity non-zero, id byte bit5 clear)')
     newbody = sp_mii.write_plaza_mii(body, cfl)
     chk, chk_ok = sp_mii.read_plaza_mii(newbody)
     if not chk_ok or chk != cfl:
-        raise ValueError('re-wrapped Mii does not verify; refusing to transmit')
+        raise ValueError('re-wrapped Mii does not verify; not transmitting')
     if log:
-        log('  MII re-wrapped and verified (CCM MAC + CRC both valid)')
+        log('  Mii re-wrapped and verified (CCM MAC + CRC both valid)')
     b[0x14 + hs: 0x14 + hs + bs] = newbody
     return reseal(bytes(b), log)
 
@@ -1074,7 +1051,7 @@ def set_greeting(obj5, text, log):
     def _dec(x):
         t = x.decode('utf-16-le', 'replace')
         return t.split('\x00')[0]
-    log('  GREETING patched at file offset 0x%X: %r -> %r' % (off, _dec(old), _dec(enc)))
+    log('  Greeting patched at file offset 0x%X: %r -> %r' % (off, _dec(old), _dec(enc)))
     log('    (length unchanged: %d B field, and the trailer was resealed over the new body)'
         % GREETING_LEN)
     return bytes(b)
@@ -1103,8 +1080,7 @@ def reorder_offer_object(our_33, console_ee, log):
             bytes(ours[0x2C + i * 0x20:0x2C + (i + 1) * 0x20])
             for i in range(min(n_ours, (len(ours) - 0x2C) // 0x20))}
     if sorted(mine) != sorted(theirs):
-        log('  offer sets differ (ours %s, theirs %s): mirroring its list verbatim, the only '
-            'form that can satisfy the count check at cecd 0x1148C0'
+        log('  offer sets differ (this %s, peer %s): mirroring its list'
             % (['%08X' % t for t in sorted(mine)], ['%08X' % t for t in sorted(theirs)]))
         return mirror_offer_object(console_ee, log)
     rec = bytearray(ours[:0x2C]) + b''.join(mine[t] for t in theirs)
@@ -1672,12 +1648,12 @@ def selftest():
 
 def build_parser():
     """The full option set, shared so other tools can build a Link's arguments."""
-    ap = argparse.ArgumentParser(description='Stage 2: complete the link, decrypt the console.')
+    ap = argparse.ArgumentParser(description='complete the link, decrypt the console.')
     ap.add_argument('--iface', default='mon0')
     ap.add_argument('--channel', default='1,6,11',
-                    help='channel, or a list to hunt across while idle (default 1,6,11)')
+                    help='channel, or a list to scan across while idle (default 1,6,11)')
     ap.add_argument('--dwell', type=float, default=6.0,
-                    help='seconds per channel while hunting')
+                    help='seconds per channel while scanning')
     ap.add_argument('--secs', type=float, default=180.0)
     ap.add_argument('--probe-interval', type=float, default=0.25)
     ap.add_argument('--poll-delay', type=float, default=0.144,
@@ -1688,8 +1664,7 @@ def build_parser():
                     help='seconds between directed probes while waiting for the link-BSS probe '
                          'response')
     ap.add_argument('--linkbss-patience', type=float, default=3.0,
-                    help='seconds to keep asking for the link BSS before giving the attempt up. '
-                         'A real 2DS XL asked a 2DS twice, 1.1 s apart, before it answered')
+                    help='seconds to keep asking the link BSS before giving up.')
     ap.add_argument('--attempt-timeout', type=float, default=6.0)
     ap.add_argument('--reactive', action='store_true', default=True,
                     help='answer a console probe immediately (default on)')
@@ -1697,13 +1672,9 @@ def build_parser():
     ap.add_argument('--min-gap', type=float, default=0.5,
                     help='minimum seconds between reactive bursts to one console')
     ap.add_argument('--manifest-repeat', type=int, default=1, metavar='N',
-                    help='when the console answers our 0x81 with nothing, send --repeat-type at '
+                    help='when the console answers 0x81 with nothing, send --repeat-type at '
                          'it, up to N times. On by default with --repeat-type 0xf2, which is '
-                         'the silent-send recovery. About a third of exchanges negotiate fully '
-                         'and then never open a connection, so nothing moves in either '
-                         'direction. A synthesised 0xF2 makes cecd rescan and re-engage '
-                         '(measured 20/20 recoveries, against 0/15 without it). Pass 0 to '
-                         'disable.')
+                         'the silent-send recovery')
     ap.add_argument('--repeat-type', default='0xf2', metavar='HEX',
                     help='what --manifest-repeat sends. The default is 0xf2, a synthesised SCAN '
                          'probe. cecd tests for type 0xF2 at 0x107424 before it reads the '
@@ -1730,15 +1701,10 @@ def build_parser():
     ap.add_argument('--fresh-mii', action='store_true',
                     help='give the message a new Mii id + creator MAC (body +0x36D4) and reseal')
     ap.add_argument('--forward', metavar='FILE', nargs='+',
-                    help='send CEC messages dumped from any title OutBox, verbatim. Each '
-                         'message names its own CEC title and already has a valid HMAC, so this '
-                         'works for titles we have never reverse-engineered. Give more than one '
-                         'file to hand them all over in one encounter, as a real console does. '
-                         'The console must have every one of those titles enabled with a '
-                         'message queued, or its offer will not match ours.')
+                    help='send CEC messages dumped from any title OutBox.')
     ap.add_argument('--keep-msgid', action='store_true',
                     help='keep the forwarded message id. By default it is rewritten, because '
-                         'the target console already has a harvested message and cecd silently '
+                         'the target console already has a harvested message and silently '
                          'discards duplicates.')
     ap.add_argument('--from-scratch', action='store_true',
                     help='build the entire outbox with sp_build, using no captured objects')
@@ -1770,11 +1736,10 @@ def build_parser():
     ap.add_argument('--full-sequence', action='store_true',
                     help='prepend the 0x41 / 0x43 / 0x11 objects that open a real exchange')
     ap.add_argument('--mirror-offer', action='store_true',
-                    help="build object 3 (0x33) by mirroring the console's 0x32 list, which is "
-                         'the only list cecd 0x1148C0 will accept')
+                    help="build object 3 (0x33) by mirroring the console's 0x32 list")
     ap.add_argument('--empty-offer', action='store_true',
                     help='replace object 3 with a type-0x33 carrying an empty ee list (count '
-                         '0), to test the count check at cecd 0x1148C0')
+                         '0)')
     ap.add_argument('--fresh-msgid', action='store_true',
                     help='randomise the CEC message id (container +0x20, outside the HMAC)')
     ap.add_argument('--fresh-consoleid', action='store_true',
