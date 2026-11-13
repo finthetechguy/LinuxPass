@@ -34,7 +34,10 @@ Working end to end:
 - Runs as a **systemd daemon/service**, with a GTK4 **GUI** on top.
 
 #### Extra
+
 - Build a StreetPass Mii Plaza message.
+- Import Outbox CEC messages, from Azahar, console, etc, to send data from different games.
+- Export Inbox CEC messages, to import into Azahar, etc, to use recieved data from other consoles.
 
 ## What it does not do
 
