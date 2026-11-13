@@ -384,8 +384,8 @@ class HomePage(Page):
         g = self.group('Data')
         g.add(self._store_row(s))
         g.add(self._logs_row(s))
-        g.add(row('Messages this relay will serve', '%d' % s['servable']))
-        g.add(row('Held', '%d' % s['held_but_never_served']))
+        g.add(row('Outbox (serving)', '%d' % s['servable']))
+        g.add(row('Inbox', '%d' % s['held_but_never_served']))
 
         g = self.group('Statistics')
         g.add(row('Exchanges since start', '%d over %d listening pass(es)'
@@ -794,16 +794,20 @@ class RelayWindow(Adw.ApplicationWindow):
 
 
 class RelayApp(Adw.Application):
-    def __init__(self, store):
+    def __init__(self, store, denylist):
         super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.NON_UNIQUE)
         self.daemon = Daemon(store)
+        self.denylist = denylist
         self.pages = []
         self.win = None
 
     def do_startup(self):
         Adw.Application.do_startup(self)
         self.pages = [HomePage(self), EncountersPage(self), OutboxPage(self),
-                      InboxPage(self), DenylistPage(self), LogPage(self)]
+                      InboxPage(self)]
+        if self.denylist:
+            self.pages.append(DenylistPage(self))
+        self.pages.append(LogPage(self))
 
     def do_activate(self):
         if self.win is None:
@@ -875,7 +879,7 @@ class RelayApp(Adw.Application):
         box.append(e)
         box.append(n)
         d = Adw.AlertDialog(heading='Block a console',
-                            body='It will never be served.')
+                            body='Prevents exchanges with that console MAC.')
         d.set_extra_child(box)
         d.add_response('cancel', 'Cancel')
         d.add_response('ok', 'Block')
@@ -1077,9 +1081,10 @@ class RelayApp(Adw.Application):
 def main():
     ap = argparse.ArgumentParser(description='GTK front end for LinuxPass.')
     ap.add_argument('--store', default=default_store())
+    ap.add_argument('--denylist', action='store_true')
     a = ap.parse_args()
     Adw.init()
-    app = RelayApp(a.store)
+    app = RelayApp(a.store, a.denylist)
     return app.run([])
 
 
