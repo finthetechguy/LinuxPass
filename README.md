@@ -13,7 +13,7 @@ This is a hobby project and not a fully stable solution, I likely won't be viewi
 reports or pull requests, if you have changes, make a fork.
 
 LinuxPass does successfully exchange against retail consoles many times, but it
-has rough edges. Only one Wi-Fi chipset is supported,and a first StreetPass usually takes 
+has rough edges. Only one Wi-Fi chipset is supported, and a first StreetPass usually takes 
 more than one attempt (see below).
 
 Working end to end:
@@ -117,7 +117,7 @@ work around this, it is off by default.
 ### Why only Linux + `ath9k` chipset?
 
 StreetPass on the 3DS has a requirement that the chipset must ACK the console's frames within
-10 microseconds, and only hardware can do that, the `ath9k` with the Linux kerne gives us control 
+10 microseconds, and only hardware can do that, the `ath9k` with the Linux kernel gives us control 
 of that, while mostly every other chipset cannot.
 
 ## Documentation
