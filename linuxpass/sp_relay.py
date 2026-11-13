@@ -484,7 +484,7 @@ def messages_for_export(store_path, titles=None):
         if not rep.get('ok'):
             raise RuntimeError(rep.get('error') or 'the daemon refused')
         return [(base64.b64decode(m['data']), m.get('when')) for m in rep['messages']]
-    raise PermissionError('cannot read the store at %s and no daemon is answering there; '
+    raise PermissionError('cannot read the store at %s, daemon not responding; '
                           're-run with sudo' % store_path)
 
 
@@ -526,7 +526,7 @@ def export_main(a):
         return 1
     running = ex.emulator_running()
     if running and not a.dry_run and not a.force:
-        print('%s is running and would overwrite this on exit; close it first (or --force)'
+        print('%s is running and may overwrite on exit; close it first (or --force)'
               % running)
         return 1
     if not a.dry_run and not a.no_backup:
@@ -2341,7 +2341,7 @@ def main():
                      help='empty the outbox first, so this becomes the only data the relay '
                           'serves. Use it when swapping in another console\'s data.')
 
-    exp = sub.add_parser('export', help="deliver received messages into an emulator's (or a "
+    exp = sub.add_parser('export', help="deliver Inbox messages into an emulator's (or a "
                                         "console-shaped) CEC folder, as if they arrived there")
     exp.add_argument('dest', nargs='?',
                      help='a CEC folder or an emulator user folder (default: the one installed '

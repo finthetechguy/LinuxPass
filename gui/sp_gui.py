@@ -599,7 +599,7 @@ class OutboxPage(StorePage):
         g = self.group('Served to consoles', 'CEC data served to consoles. ' + note)
         box = Gtk.Box(spacing=6, halign=Gtk.Align.END, valign=Gtk.Align.CENTER, margin_bottom=6)
         for label, cb in (('Create Mii Plaza Message', self.app.dialog_identity),
-                          ('Import CEC data', self.app.dialog_import)):
+                          ('Import', self.app.dialog_import)):
             b = Gtk.Button(label=label)
             b.connect('clicked', lambda _b, f=cb: f())
             box.append(b)
@@ -983,17 +983,15 @@ class RelayApp(Adw.Application):
             short = [d.split(os.sep + 'nand' + os.sep)[0] for _n, d in emus]
             where = '\n'.join('%s: %s' % (n, '~' + d[len(home):] if d.startswith(home + '/')
                                            else d) for (n, _d), d in zip(emus, short))
-            body = ('Deliver puts every received message into the emulator\'s StreetPass '
-                    'inboxes, as if it had arrived there. Only titles whose game has been '
-                    'started there with StreetPass on can take messages. The emulator must be '
-                    'closed, and its CEC data is backed up first.\n\n%s\n\n' % where)
+            body = ('Puts every Inbox message into the emulator\'s StreetPass '
+                    'inboxes, as if it had StreetPass\'ed there. The emulator must be '
+                    'closed, its CEC data is also backed up first.\n\n%s\n\n' % where)
         else:
             body = 'No 3DS emulator with CEC data was found.\n\n'
-        body += ('Choose a folder to deliver into a CEC folder there, or, for any other '
-                 'folder, to copy the messages out unchanged.')
-        d = Adw.AlertDialog(heading='Export received messages', body=body)
+        body += ('Choose a directory to export CEC Inbox data into.')
+        d = Adw.AlertDialog(heading='Export Inbox messages', body=body)
         d.add_response('cancel', 'Cancel')
-        d.add_response('folder', 'Choose folder…')
+        d.add_response('folder', 'Choose directory')
         for i, (name, _path) in enumerate(emus):
             d.add_response('emu%d' % i, 'Deliver to %s' % name)
         if emus:
@@ -1009,7 +1007,7 @@ class RelayApp(Adw.Application):
 
         def resp(_d, r):
             if r == 'folder':
-                Gtk.FileDialog(title='Export received messages to').select_folder(
+                Gtk.FileDialog(title='Export Inbox messages to').select_folder(
                     self.win, None, on_folder)
             elif r.startswith('emu'):
                 self._export(emus[int(r[3:])][1])
@@ -1029,15 +1027,14 @@ class RelayApp(Adw.Application):
                 return 'Copied %d message(s) to %s.' % (len(ex.write_raw(msgs, dest)), dest)
             running = ex.emulator_running()
             if running:
-                raise RuntimeError('%s is running, and would overwrite the messages when it '
-                                   'exits. Close it and export again.' % running)
+                raise RuntimeError('%s is running. Close it and export again.' % running)
             folder = ex.CecFolder(dest)
             backup = folder.backup(ex.default_backup_dir())
             notes = []
             counts = ex.deliver_all(folder, msgs, log=notes.append)
             text = 'Delivered %d message(s).' % counts.get(ex.ADDED, 0)
             if counts.get(ex.DUPLICATE):
-                text += ' %d were already there.' % counts[ex.DUPLICATE]
+                text += ' %d already exists.' % counts[ex.DUPLICATE]
             if notes:
                 text += '\n\nNot delivered:\n' + '\n'.join(n.strip() for n in notes[:12])
                 if len(notes) > 12:
