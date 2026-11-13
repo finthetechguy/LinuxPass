@@ -225,9 +225,13 @@ class CecFolder:
         return out
 
 
-def default_backup_dir():
-    base = os.environ.get('XDG_DATA_HOME') or os.path.join(os.path.expanduser('~'),
-                                                           '.local', 'share')
+def default_backup_dir(home=None):
+    """~/.local/share/linuxpass/cec-backups, for `home` (sudo's caller) when given."""
+    if home:
+        base = os.path.join(home, '.local', 'share')
+    else:
+        base = os.environ.get('XDG_DATA_HOME') or os.path.join(os.path.expanduser('~'),
+                                                               '.local', 'share')
     return os.path.join(base, 'linuxpass', 'cec-backups')
 
 
@@ -364,6 +368,10 @@ def _selftest():
         raw = write_raw([(a, 1.0)], os.path.join(tmp, 'raw'))
         chk('a raw export writes the message unchanged',
             len(raw) == 1 and open(raw[0], 'rb').read() == a and '/00020800/_' in raw[0])
+        chk('backups go under the given home, or XDG_DATA_HOME without one',
+            default_backup_dir('/home/u') == '/home/u/.local/share/linuxpass/cec-backups'
+            and _with_env('XDG_DATA_HOME', tmp, default_backup_dir)
+            == os.path.join(tmp, 'linuxpass', 'cec-backups'))
         chk('a non-BoxInfo is rejected', _raises(lambda: parse_boxinfo(b'zz' + b'\x00' * 30)))
         chk('a BoxInfo shorter than its count is rejected',
             _raises(lambda: parse_boxinfo(build_boxinfo(fields, [])[:0x14] + b'\x05' + b'\x00' * 11)))
