@@ -142,6 +142,8 @@ publish it.
 Nintendo, Nintendo 3DS and StreetPass are trademarks of Nintendo. This project is not affiliated
 with or endorsed by Nintendo.
 
+Linux® is the registered trademark of Linus Torvalds in the U.S. and other countries.
+
 ### AI Usage Disclaimer
 LLMs were used to build this program, through writing scripts and reverse engineering. However,
 LinuxPass has been extensively tested on various consoles by a real human (me!)
