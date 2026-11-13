@@ -6,8 +6,9 @@ import base64
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sp_store, sp_cecstore, sp_cec, sp_harvest_air, sp_build
 
-# A console's inbox holds about 9 messages per title, so frequent exchanges only fill it.
-DEFAULT_COOLDOWN = 12 * 3600.0
+# Like a 3DS's own MacFilter: a MAC that has completed an exchange is refused until it changes.
+# The console keeps the last 255 and never expires one; a 3DS presents a new MAC from time to time.
+MAC_FILTER_MAX = 255
 CONTROL_SOCKET = 'relay.sock'
 STATE_FILE = 'relay_state.json'
 ENCOUNTERS_FILE = 'encounters.jsonl'
@@ -223,27 +224,53 @@ def message_is_whole(msg):
 
 
 class PeerBook:
-    """Per-peer history: when we last exchanged, and what we have already given them."""
+    """Per-peer history (what we have given each MAC), the MAC filter, and the denylist.
 
-    def __init__(self, path, cooldown=DEFAULT_COOLDOWN, retry=60.0):
+    The filter works the way a 3DS's does: once a MAC completes an exchange it is refused, with
+    no expiry, until it is removed by hand or pushed out by newer entries. A real console rotates
+    its MAC, and a new MAC is a new peer.
+    """
+
+    def __init__(self, path, retry=60.0, filter_max=MAC_FILTER_MAX):
         self.path = path
-        self.cooldown = cooldown
         self.retry = retry
+        self.filter_max = filter_max
         self.peers = {}
         self.blocked = {}
+        self.filter = []
         if os.path.exists(path):
             try:
                 d = json.load(open(path))
                 self.peers = d.get('peers', {})
                 self.blocked = d.get('blocked', {})
+                f = d.get('filter')
+                if f is None:
+                    # A state file from before the filter: every MAC that exchanged is in it.
+                    f = sorted((m for m, e in self.peers.items() if e.get('exchanges', 0) > 0),
+                               key=lambda m: self.peers[m].get('last', 0))
+                self.filter = [m.lower() for m in f][-filter_max:]
             except (ValueError, OSError):
-                self.peers, self.blocked = {}, {}
+                self.peers, self.blocked, self.filter = {}, {}, []
 
     def save(self):
         tmp = self.path + '.tmp'
         with open(tmp, 'w') as f:
-            json.dump({'peers': self.peers, 'blocked': self.blocked}, f, indent=1, sort_keys=True)
+            json.dump({'peers': self.peers, 'blocked': self.blocked, 'filter': self.filter},
+                      f, indent=1, sort_keys=True)
         os.replace(tmp, self.path)
+
+    def is_filtered(self, mac):
+        return mac.lower() in self.filter
+
+    def unfilter(self, mac=None):
+        """Take one MAC out of the filter, or empty it. -> how many were removed."""
+        if mac is None:
+            n, self.filter = len(self.filter), []
+        else:
+            n = 1 if mac.lower() in self.filter else 0
+            self.filter = [m for m in self.filter if m != mac.lower()]
+        self.save()
+        return n
 
     def is_blocked(self, mac):
         return mac.lower() in self.blocked
@@ -259,27 +286,11 @@ class PeerBook:
         self.save()
         return gone
 
-    def set_wait(self, mac, seconds, now=None):
-        """Make this peer due in exactly `seconds`."""
-        now = time.time() if now is None else now
-        e = self.peers.get(mac.lower())
-        if e is None:
-            return False
-        e['last'] = now - max(0.0, self.cooldown - max(0.0, float(seconds)))
-        e['last_attempt'] = 0
-        self.save()
-        return True
-
     def due(self, mac, now=None):
-        """-> True if this peer may be engaged now."""
-        now = time.time() if now is None else now
-        e = self.peers.get(mac.lower())
-        if not e:
-            return True
-        if (now - e.get('last', 0)) < self.cooldown:
+        """-> True if this peer may be engaged now: not filtered, and not backing off."""
+        if self.is_filtered(mac):
             return False
-        la = e.get('last_attempt') or 0
-        return la <= 0 or (now - la) >= self.retry
+        return self.wait(mac, now) <= 0
 
     def note_attempt(self, mac, now=None):
         """Record an engagement that did not complete, so we back off briefly, not for hours."""
@@ -291,14 +302,13 @@ class PeerBook:
         self.save()
 
     def wait(self, mac, now=None):
-        """-> seconds until this peer is due, 0 if it is due now."""
+        """-> seconds left of the retry backoff after a failed attempt (the filter has no clock)."""
         now = time.time() if now is None else now
         e = self.peers.get(mac.lower())
         if not e:
             return 0.0
         la = e.get('last_attempt') or 0
-        backoff = (self.retry - (now - la)) if la > 0 else 0.0
-        return max(0.0, self.cooldown - (now - e.get('last', 0)), backoff)
+        return max(0.0, (self.retry - (now - la)) if la > 0 else 0.0)
 
     def record(self, mac, sent_ids=(), got_ids=(), now=None):
         now = time.time() if now is None else now
@@ -306,18 +316,24 @@ class PeerBook:
                                                 'sent': [], 'received': []})
         e['last'] = now
         e['exchanges'] = e.get('exchanges', 0) + 1
+        e['last_attempt'] = 0
         for k, ids in (('sent', sent_ids), ('received', got_ids)):
             have = set(e.get(k, []))
             e[k] = sorted(have | {i.hex() if isinstance(i, (bytes, bytearray)) else i for i in ids})
+        m = mac.lower()
+        if m not in self.filter:
+            self.filter.append(m)
+            del self.filter[:-self.filter_max]
         self.save()
 
     def forget(self, mac=None):
         """Drop one peer's history, or all of it."""
         if mac is None:
             n = len(self.peers)
-            self.peers = {}
+            self.peers, self.filter = {}, []
         else:
             n = 1 if self.peers.pop(mac.lower(), None) is not None else 0
+            self.filter = [m for m in self.filter if m != mac.lower()]
         self.save()
         return n
 
@@ -578,11 +594,16 @@ class Control:
             now = time.time()
             return {'ok': True,
                     'blocked': [{'mac': m, **v} for m, v in sorted(r.book.blocked.items())],
-                    'cooldowns': [{'mac': m, 'exchanges': e.get('exchanges', 0),
-                                   'attempts': e.get('attempts', 0),
-                                   'last': e.get('last', 0),
-                                   'remaining_s': round(r.book.wait(m, now), 1)}
-                                  for m, e in sorted(r.book.peers.items())]}
+                    # Newest first, the way the GUI lists it.
+                    'filter': [{'mac': m,
+                                'exchanges': r.book.peers.get(m, {}).get('exchanges', 0),
+                                'last': r.book.peers.get(m, {}).get('last', 0)}
+                               for m in reversed(r.book.filter)],
+                    'filter_max': r.book.filter_max,
+                    'backing_off': [{'mac': m, 'attempts': e.get('attempts', 0),
+                                     'remaining_s': w}
+                                    for m, e in sorted(r.book.peers.items())
+                                    for w in [round(r.book.wait(m, now), 1)] if w > 0]}
         if cmd == 'log':
             return {'ok': True, 'log': r.recent_log(int(req.get('limit', 300)))}
 
@@ -596,13 +617,11 @@ class Control:
             gone = r.book.unblock(req.get('mac', ''))
             r.log('  %s removed from the denylist' % req.get('mac'))
             return {'ok': True, 'unblocked': gone}
-        if cmd == 'cooldown':
-            if not req.get('mac'):
-                return {'ok': False, 'error': 'cooldown needs a mac'}
-            known = r.book.set_wait(req['mac'], float(req.get('seconds', 0)))
-            r.log('  %s is now due in %.0f s' % (req['mac'], float(req.get('seconds', 0))))
-            return {'ok': True, 'known': known,
-                    'remaining_s': round(r.book.wait(req['mac']), 1)}
+        if cmd == 'unfilter':
+            n = r.book.unfilter(req.get('mac'))
+            r.log('  removed %d MAC(s) from the filter%s'
+                  % (n, ' (%s)' % req['mac'] if req.get('mac') else ''))
+            return {'ok': True, 'removed': n}
 
         if cmd == 'rotate':
             if 'seconds' in req:
@@ -787,7 +806,7 @@ def credited_objects(sess, log=print):
     """How many of our objects the console really kept, for recording an exchange.
 
     A console that never sent its own 0x81 list drops everything it acknowledged (no green LED),
-    and recording it would charge a 12 h cooldown for an exchange that never happened.
+    and recording it would filter the MAC for an exchange that never happened.
     """
     delivered = sess.stats.get('sent_objects', 0) if sess else 0
     if delivered and not sess.peer_sent_manifest():
@@ -827,7 +846,7 @@ class Relay:
     def __init__(self, args):
         self.a = args
         self.store = sp_store.Store(args.store)
-        self.book = PeerBook(os.path.join(args.store, STATE_FILE), cooldown=args.cooldown,
+        self.book = PeerBook(os.path.join(args.store, STATE_FILE),
                              retry=getattr(args, 'retry', 60.0))
         self.enabled = not args.start_paused
         self.running = True
@@ -1037,7 +1056,6 @@ class Relay:
                                 else max(0.0, round(self.identity_since + self.rotate_seconds()
                                                     - time.time(), 1))),
             'rotations': self.rotations,
-            'cooldown_s': self.a.cooldown,
             'exchange_gap_s': self.exchange_gap,
             'iface_failures': self.iface_failures,
             'passes': self.passes,
@@ -1048,9 +1066,8 @@ class Relay:
             'servable': len(self.servable()),
             'held_but_never_served': len({c[0x20:0x28] for _t, _b, c in self.store.messages()}
                                          - {c[0x20:0x28] for c in self.servable()}),
-            'peers': {m: {'exchanges': e.get('exchanges', 0),
-                          'due_in_s': round(self.book.wait(m), 1)}
-                      for m, e in self.book.peers.items()},
+            'filtered': len(self.book.filter),
+            'filter_max': self.book.filter_max,
         }
 
     def describe_store(self):
@@ -1170,11 +1187,16 @@ class Relay:
                               '  %s is on the denylist; refusing to exchange with it' % mac)
             self.note_encounter({'peer': mac, 'result': 'blocked'})
             return r
+        if self.book.is_filtered(mac):
+            return self._decline(link, 'filtered',
+                                 '  %s has already exchanged with us, so like a 3DS we refuse '
+                                 'it until that console presents a new MAC' % mac)
         if not self.book.due(mac):
-            return self._decline(link, 'cooldown',
-                                 '  %s is inside its cooldown (%.0f s to go); serving it '
-                                 'nothing so the next pass can reach a different console'
-                                 % (mac, self.book.wait(mac)))
+            return self._decline(link, 'backing off',
+                                 '  %s failed an attempt %.0f s ago; serving it nothing for '
+                                 'another %.0f s so the next pass can reach a different console'
+                                 % (mac, self.book.retry - self.book.wait(mac),
+                                    self.book.wait(mac)))
         titles = self.peer_titles(peer_services)
         with self.lock:
             picked = select_for_peer(self.store, titles, self.book, mac, log=self.log)
@@ -1303,7 +1325,7 @@ class Relay:
             return False
         self.book.note_attempt(peer)
         self.note_encounter({'peer': peer, 'result': 'engaged but nothing moved'})
-        self.log('  %s engaged but nothing moved; backing off %.0f s instead of the full cooldown'
+        self.log('  %s engaged but nothing moved; backing off %.0f s before trying it again'
                  % (peer, self.book.retry))
         return False
 
@@ -1467,7 +1489,7 @@ def _selftest():
                 st2.title_key(0x00030600) == st.title_key(0x00030600)
                 and st2.title_name(0x00030600) == 'MARIO KART 7')
 
-        book = PeerBook(os.path.join(tmp, 'peers.json'), cooldown=100.0)
+        book = PeerBook(os.path.join(tmp, 'peers.json'))
         NS = argparse.Namespace
         import sp_yysession
 
@@ -1502,27 +1524,32 @@ def _selftest():
 
         chk('an unknown peer is due immediately', book.due('AA:BB:CC:00:00:01'))
         book.record('AA:BB:CC:00:00:01', [b'\x01' * 8], [b'\x02' * 8], now=1000.0)
-        chk('a peer just met is not due', not book.due('AA:BB:CC:00:00:01', now=1050.0))
-        chk('and reports how long to wait', book.wait('AA:BB:CC:00:00:01', now=1050.0) == 50.0)
-        chk('it is due again after the cooldown', book.due('AA:BB:CC:00:00:01', now=1101.0))
+        chk('a peer just met is filtered', book.is_filtered('AA:BB:CC:00:00:01')
+            and not book.due('AA:BB:CC:00:00:01', now=1050.0))
+        chk('and the filter never expires, like a 3DS',
+            not book.due('AA:BB:CC:00:00:01', now=1000.0 + 365 * 86400))
+        chk('it has no clock, so wait() is zero', book.wait('AA:BB:CC:00:00:01', now=1050.0) == 0)
         chk('peer matching is case-insensitive', not book.due('aa:bb:cc:00:00:01', now=1050.0))
+        chk('a different MAC is a different peer', book.due('AA:BB:CC:00:00:02', now=1050.0))
         chk('we remember what we sent it', book.already_sent('AA:BB:CC:00:00:01', b'\x01' * 8))
         chk('and what came from it', book.came_from('AA:BB:CC:00:00:01', b'\x02' * 8))
-        book2 = PeerBook(os.path.join(tmp, 'peers.json'), cooldown=100.0)
+        book2 = PeerBook(os.path.join(tmp, 'peers.json'))
         chk('the peer book survives a restart', not book2.due('AA:BB:CC:00:00:01', now=1050.0))
-        b5 = PeerBook(os.path.join(tmp, 'p5.json'), cooldown=100.0, retry=10.0)
+        b5 = PeerBook(os.path.join(tmp, 'p5.json'), retry=10.0)
         b5.note_attempt('DE:AD:00:00:00:01', now=2000.0)
-        b6 = PeerBook(os.path.join(tmp, 'p6.json'), cooldown=100.0)
+        b6 = PeerBook(os.path.join(tmp, 'p6.json'))
         b6.record('AA:00:00:00:00:01', now=1000.0)
         b6.record('AA:00:00:00:00:02', now=1000.0)
         chk('a peer can be forgotten so it is due again',
             b6.forget('aa:00:00:00:00:01') == 1 and b6.due('AA:00:00:00:00:01', now=1050.0))
+        chk('and leaves the filter too', not b6.is_filtered('AA:00:00:00:00:01'))
         chk('and the others are left alone', not b6.due('AA:00:00:00:00:02', now=1050.0))
         chk('forgetting an unknown peer is not an error', b6.forget('FF:FF:FF:FF:FF:FF') == 0)
         chk('forgetting everything works too',
-            b6.forget() == 1 and PeerBook(os.path.join(tmp, 'p6.json')).peers == {})
+            b6.forget() == 1 and PeerBook(os.path.join(tmp, 'p6.json')).peers == {}
+            and PeerBook(os.path.join(tmp, 'p6.json')).filter == [])
 
-        b7 = PeerBook(os.path.join(tmp, 'p7.json'), cooldown=100.0)
+        b7 = PeerBook(os.path.join(tmp, 'p7.json'))
         chk('an unknown peer is not blocked', not b7.is_blocked('CA:FE:00:00:00:01'))
         b7.block('CA:FE:00:00:00:01', note='noisy neighbour')
         chk('a blocked peer reports blocked', b7.is_blocked('ca:fe:00:00:00:01'))
@@ -1531,46 +1558,60 @@ def _selftest():
             b7.blocked['ca:fe:00:00:00:01']['note'] == 'noisy neighbour')
         chk('a block survives a restart',
             PeerBook(os.path.join(tmp, 'p7.json')).is_blocked('CA:FE:00:00:00:01'))
-        chk('and blocking is separate from the cooldown -- it is still "due"',
+        chk('and blocking is separate from the filter -- it is still "due"',
             b7.due('CA:FE:00:00:00:01'))
         chk('unblocking works', b7.unblock('CA:FE:00:00:00:01')
             and not b7.is_blocked('CA:FE:00:00:00:01'))
         chk('unblocking an unknown peer is not an error', b7.unblock('00:00:00:00:00:00') is False)
         old_state = json.load(open(os.path.join(tmp, 'p7.json')))
-        chk('the state file carries both lists', {'peers', 'blocked'} <= set(old_state))
+        chk('the state file carries all three lists',
+            {'peers', 'blocked', 'filter'} <= set(old_state))
         json.dump({'peers': {'aa:bb:cc:dd:ee:ff': {'exchanges': 1}}},
                   open(os.path.join(tmp, 'p8.json'), 'w'))
         chk('a state file written before blocklists existed still loads',
             PeerBook(os.path.join(tmp, 'p8.json')).blocked == {}
             and 'aa:bb:cc:dd:ee:ff' in PeerBook(os.path.join(tmp, 'p8.json')).peers)
+        json.dump({'peers': {'aa:00:00:00:00:02': {'exchanges': 1, 'last': 20},
+                             'aa:00:00:00:00:01': {'exchanges': 2, 'last': 10},
+                             'aa:00:00:00:00:03': {'exchanges': 0, 'attempts': 1}}},
+                  open(os.path.join(tmp, 'p8b.json'), 'w'))
+        chk('a state file from before the filter puts every MAC that exchanged in it, oldest first',
+            PeerBook(os.path.join(tmp, 'p8b.json')).filter
+            == ['aa:00:00:00:00:01', 'aa:00:00:00:00:02'])
 
-        b9 = PeerBook(os.path.join(tmp, 'p9.json'), cooldown=1000.0)
-        b9.record('AB:CD:00:00:00:01', now=5000.0)
-        chk('a fresh exchange leaves the full cooldown',
-            abs(b9.wait('AB:CD:00:00:00:01', now=5000.0) - 1000.0) < 1)
-        b9.set_wait('AB:CD:00:00:00:01', 30.0, now=5000.0)
-        chk('the remaining time can be set to an exact value',
-            abs(b9.wait('AB:CD:00:00:00:01', now=5000.0) - 30.0) < 1,
-            b9.wait('AB:CD:00:00:00:01', now=5000.0))
-        chk('and it is still not due until that elapses',
-            not b9.due('AB:CD:00:00:00:01', now=5020.0))
-        b9.set_wait('AB:CD:00:00:00:01', 0, now=5000.0)
-        chk('setting it to zero makes it due now', b9.due('AB:CD:00:00:00:01', now=5000.0))
-        chk('but does NOT discard what we already sent it',
-            'sent' in b9.peers['ab:cd:00:00:00:01'])
-        chk('setting the wait on an unknown peer says so',
-            b9.set_wait('FF:FF:FF:FF:FF:FF', 10) is False)
+        b9 = PeerBook(os.path.join(tmp, 'p9.json'))
+        b9.record('AB:CD:00:00:00:01', [b'\x01' * 8], now=5000.0)
+        chk('a MAC can be taken out of the filter', b9.unfilter('ab:cd:00:00:00:01') == 1
+            and b9.due('AB:CD:00:00:00:01', now=5000.0))
+        chk('but that does NOT discard what we already sent it',
+            b9.already_sent('AB:CD:00:00:00:01', b'\x01' * 8))
+        chk('unfiltering a MAC that is not there says so', b9.unfilter('FF:FF:FF:FF:FF:FF') == 0)
+        b9.record('AB:CD:00:00:00:01', now=5001.0)
+        b9.record('AB:CD:00:00:00:02', now=5002.0)
+        chk('a MAC is listed once however many exchanges it has',
+            b9.filter == ['ab:cd:00:00:00:01', 'ab:cd:00:00:00:02'])
+        chk('the whole filter can be emptied', b9.unfilter() == 2 and b9.filter == []
+            and PeerBook(os.path.join(tmp, 'p9.json')).filter == [])
+        bf = PeerBook(os.path.join(tmp, 'pf.json'), filter_max=3)
+        for k in range(5):
+            bf.record('F0:00:00:00:00:%02X' % k, now=100.0 + k)
+        chk('a full filter drops its oldest MAC, so it holds at most the newest 255',
+            bf.filter == ['f0:00:00:00:00:%02x' % k for k in (2, 3, 4)], bf.filter)
+        chk('and a MAC pushed out may exchange again', bf.due('F0:00:00:00:00:00', now=200.0))
+        chk('the filter survives a restart',
+            PeerBook(os.path.join(tmp, 'pf.json'), filter_max=3).filter == bf.filter)
+
         chk('a failed attempt backs off briefly', not b5.due('DE:AD:00:00:00:01', now=2005.0))
-        chk('and is retried after the short backoff, not the cooldown',
+        chk('and is retried after the short backoff',
             b5.due('DE:AD:00:00:00:01', now=2011.0))
-        chk('a failed attempt does not count as an exchange',
-            b5.peers['de:ad:00:00:00:01'].get('exchanges', 0) == 0)
+        chk('a failed attempt does not count as an exchange, so it does not filter the MAC',
+            b5.peers['de:ad:00:00:00:01'].get('exchanges', 0) == 0
+            and not b5.is_filtered('DE:AD:00:00:00:01'))
 
         T0 = 1000.0
-        b10 = PeerBook(os.path.join(tmp, 'p10.json'), cooldown=30.0, retry=60.0)
-        b10.record('CA:FE:00:00:00:01', now=T0)
+        b10 = PeerBook(os.path.join(tmp, 'p10.json'), retry=60.0)
         b10.note_attempt('CA:FE:00:00:00:01', now=T0)
-        chk('wait() reports the retry backoff when it outlasts the cooldown',
+        chk('wait() reports the retry backoff',
             abs(b10.wait('CA:FE:00:00:00:01', now=T0 + 44) - 16.0) < 1,
             b10.wait('CA:FE:00:00:00:01', now=T0 + 44))
         chk('and it is not due while wait() is non-zero',
@@ -1579,30 +1620,28 @@ def _selftest():
             b10.wait('CA:FE:00:00:00:01', now=T0 + 60) == 0.0
             and b10.due('CA:FE:00:00:00:01', now=T0 + 60))
         chk('a peer that never failed is not held by the retry rule at all',
-            PeerBook(os.path.join(tmp, 'p10b.json'), cooldown=30.0, retry=60.0)
+            PeerBook(os.path.join(tmp, 'p10b.json'), retry=60.0)
             .due('CA:FE:00:00:00:09', now=T0))
         ENG = (16.0, 31.0, 44.0, 80.0, 87.0, 100.0, 144.0, 157.0)
-        b11 = PeerBook(os.path.join(tmp, 'p11.json'), cooldown=30.0, retry=60.0)
-        b11.record('CA:FE:00:00:00:02', now=T0)
+        b11 = PeerBook(os.path.join(tmp, 'p11.json'), retry=60.0)
+        b11.note_attempt('CA:FE:00:00:00:02', now=T0)
         for t in ENG:
             if not b11.due('CA:FE:00:00:00:02', now=T0 + t):
                 b11.note_attempt('CA:FE:00:00:00:02', now=T0 + t)
         chk('re-arming the backoff on every refusal is what locked the peer out for ever',
             not b11.due('CA:FE:00:00:00:02', now=T0 + 157))
-        b12 = PeerBook(os.path.join(tmp, 'p12.json'), cooldown=30.0, retry=60.0)
-        b12.record('CA:FE:00:00:00:03', now=T0)
-        for t in ENG:
-            pass
-        chk('declining to serve records nothing, so the peer is due when its cooldown expires',
-            b12.due('CA:FE:00:00:00:03', now=T0 + 44)
+        b12 = PeerBook(os.path.join(tmp, 'p12.json'), retry=60.0)
+        b12.note_attempt('CA:FE:00:00:00:03', now=T0)
+        chk('declining to serve records nothing, so the peer is due when its backoff expires',
+            b12.due('CA:FE:00:00:00:03', now=T0 + 60)
             and b12.due('CA:FE:00:00:00:03', now=T0 + 157))
-        chk('and the two refusals inside the cooldown are correctly refused',
+        chk('and the refusals inside the backoff are correctly refused',
             not b12.due('CA:FE:00:00:00:03', now=T0 + 16)
-            and not b12.due('CA:FE:00:00:00:03', now=T0 + 29))
-        chk('setting the wait clears the retry backoff too, so the number is the truth',
-            (b10.set_wait('CA:FE:00:00:00:01', 5.0, now=T0 + 100)
-             and abs(b10.wait('CA:FE:00:00:00:01', now=T0 + 100) - 5.0) < 1),
-            b10.wait('CA:FE:00:00:00:01', now=T0 + 100))
+            and not b12.due('CA:FE:00:00:00:03', now=T0 + 59))
+        b12.record('CA:FE:00:00:00:03', now=T0 + 70)
+        chk('a completed exchange clears the backoff and filters the MAC instead',
+            b12.wait('CA:FE:00:00:00:03', now=T0 + 70) == 0
+            and b12.is_filtered('CA:FE:00:00:00:03'))
 
         if src is not None:
             stb = sp_store.Store(os.path.join(tmp, 'backfill'))
@@ -1683,7 +1722,7 @@ def _selftest():
                 st5.origin([c for _t, _b, c in st5.messages(0x00030600)][0])['source']
                 == os.path.abspath(src))
 
-        args = argparse.Namespace(store=os.path.join(tmp, 'store'), cooldown=100.0, mac=None,
+        args = argparse.Namespace(store=os.path.join(tmp, 'store'), mac=None,
                                   rotate_identity=False, rotate_every='0',
                                   start_paused=False, iface='sim',
                                   exchange_gap=0.0, keep_runs=3, max_iface_failures=3,
@@ -1973,8 +2012,9 @@ def _selftest():
                 and any(not m['servable'] for tt in st_['store']['titles']
                         for m in tt['messages']) if len(st_['store']['titles']) > 1 else True)
 
-            chk('the denylist view has both halves',
-                {'blocked', 'cooldowns'} <= set(send_command(sockp, 'denylist')))
+            chk('the denylist view has the blocklist and the filter',
+                {'blocked', 'filter', 'filter_max', 'backing_off'}
+                <= set(send_command(sockp, 'denylist')))
             chk('blocking over the socket needs a mac',
                 send_command(sockp, 'block')['ok'] is False)
             send_command(sockp, 'block', mac='DE:AD:BE:EF:00:01', note='test')
@@ -1988,13 +2028,21 @@ def _selftest():
             chk('unblocking clears it', not send_command(sockp, 'denylist')['blocked'])
 
             r.book.record('BE:EF:00:00:00:09')
-            send_command(sockp, 'cooldown', mac='BE:EF:00:00:00:09', seconds=5)
-            chk('the time remaining can be set from the socket',
-                abs(send_command(sockp, 'cooldown', mac='BE:EF:00:00:00:09',
-                                 seconds=5)['remaining_s'] - 5) < 1)
-            chk('setting it to zero makes the peer due',
-                send_command(sockp, 'cooldown', mac='BE:EF:00:00:00:09',
-                             seconds=0)['remaining_s'] == 0)
+            dl = send_command(sockp, 'denylist')
+            chk('an exchanged MAC is listed in the filter, newest first',
+                dl['filter'][0]['mac'] == 'be:ef:00:00:00:09' and dl['filter_max'] == 255,
+                dl['filter'][:1])
+            chk('and counted in the status', r.status()['filtered'] == len(r.book.filter))
+            chk('and the relay refuses to serve it',
+                r.peer_hook(None, 'BE:EF:00:00:00:09', [{'titleID': '00020800'}]) is None)
+            chk('one MAC can be taken out of the filter from the socket',
+                send_command(sockp, 'unfilter', mac='BE:EF:00:00:00:09')['removed'] == 1
+                and 'be:ef:00:00:00:09' not in
+                [f['mac'] for f in send_command(sockp, 'denylist')['filter']])
+            r.book.record('BE:EF:00:00:00:0A')
+            chk('and the whole filter can be emptied',
+                send_command(sockp, 'unfilter')['removed'] >= 1
+                and send_command(sockp, 'denylist')['filter'] == [])
 
             r.note_encounter({'peer': 'AA:BB:CC:00:00:07', 'result': 'exchanged',
                               'sent': [{'title': '00020800', 'bytes': 32712}], 'received': []})
@@ -2172,9 +2220,9 @@ def _selftest():
             out3 = {}
             sp_link.simulate(verbose=0, peer_hook=rcd.peer_hook, out=out3)
             L3 = out3['link']
-            chk('a cooldown decline reaches the link too', L3.declined == 'cooldown', L3.declined)
-            chk('and names the cooldown in the run log',
-                'cooldown' in '\n'.join(L3.log_lines))
+            chk('a filter decline reaches the link too', L3.declined == 'filtered', L3.declined)
+            chk('and names the filter in the run log',
+                'new MAC' in '\n'.join(L3.log_lines))
 
             L1 = out['link']
             L1.verdict(_tx, _tx, None)
@@ -2271,34 +2319,29 @@ def main():
                           'fails an engagement backs off and may not try again for a minute or '
                           'more, so a short window tears the pass down mid-retry.')
     run.add_argument('--idle', type=float, default=2.0, help='pause between passes')
-    run.add_argument('--cooldown', type=float, default=DEFAULT_COOLDOWN,
-                     help='seconds before the same console is engaged again, keyed on the '
-                          "peer's MAC. This is our own rate limit, which stops us filling a "
-                          'console inbox (about 8 or 9 messages per title) with duplicates of '
-                          "our messages. The console's MacFilter is a separate, stricter limit "
-                          'on the far end, keyed on our MAC, and this program cannot lift it.')
+    # Replaced by the MAC filter; still accepted so an old unit's command line does not fail.
+    run.add_argument('--cooldown', type=float, default=None, help=argparse.SUPPRESS)
     run.add_argument('--mac', default=None, help='override the fixed identity')
     run.add_argument('--rotate-every', default='0', metavar='SECONDS',
                      help='present a new MAC every SECONDS (0 = never, the default; minimum '
                           '%d). The change happens between passes, so it cannot land inside an '
                           'exchange. The schedule is saved, so a restart resumes it and does '
                           'not fall back to the fixed MAC that consoles have already blocked. '
-                          'This lifts the limit on the far end (the MacFilter). Our own '
-                          'cooldown is separate: a period shorter than --cooldown gains nothing '
-                          'against a console we have already met, because the peer book still '
-                          'holds it off.'
+                          'This lifts the limit on the far end (the console\'s MacFilter). Our '
+                          'own filter is the mirror of it: a console we have exchanged with is '
+                          'refused until it presents a new MAC.'
                           % MIN_ROTATE_SECONDS)
     run.add_argument('--rotate-identity', action='store_true',
-                     help='present a new MAC for every exchange. This gets past both our own '
-                          "--cooldown and the peer console's MacFilter, which refuses any MAC "
+                     help='present a new MAC for every exchange. This gets past the peer '
+                          "console's MacFilter, which refuses any MAC "
                           'it has already completed an exchange with and was still refusing one '
                           '18.1 h later (measured 6 Sep 2026). On a fixed MAC the relay gets '
                           'one exchange per console each time the filter is cleared by hand. '
                           'Off by default because no real console rotates like this.')
     run.add_argument('--exchange-gap', type=float, default=0.0,
                      help='seconds to hold off after a completed exchange before engaging '
-                          'anything at all. Unlike the per-peer cooldown, this does not depend '
-                          'on a MAC, which consoles rotate.')
+                          'anything at all. Unlike the MAC filter, this does not depend on a '
+                          'MAC, which consoles rotate.')
     run.add_argument('--max-iface-failures', type=int, default=3,
                      help='consecutive passes with an unusable monitor interface before exiting '
                           'non-zero, so the systemd unit restarts and rebuilds it')
@@ -2364,7 +2407,7 @@ def main():
     ct = sub.add_parser('ctl', help='talk to a running daemon')
     ct.add_argument('command', choices=['status', 'pause', 'resume', 'toggle', 'stop', 'import',
                                         'forget', 'seed', 'store', 'encounters', 'denylist',
-                                        'log', 'block', 'unblock', 'cooldown', 'title_remove',
+                                        'log', 'block', 'unblock', 'unfilter', 'title_remove',
                                         'message_remove', 'rotate', 'set_adapter', 'set_logs',
                                         'set_store'])
     ct.add_argument('--store', default='relay_store')
@@ -2372,11 +2415,11 @@ def main():
     ct.add_argument('--replace', action='store_true',
                     help='for `ctl import`: clear the outbox; for `ctl seed`: replace the '
                          'existing Mii Plaza message')
-    ct.add_argument('--mac', help='the peer for forget / block / unblock / cooldown')
+    ct.add_argument('--mac', help='the peer for forget / block / unblock / unfilter '
+                                  '(forget and unfilter without --mac apply to every peer)')
     ct.add_argument('--note', default='', help='for `ctl block`: why')
     ct.add_argument('--seconds', type=float,
-                    help='for `ctl cooldown`: time remaining. For `ctl rotate`: the rotation '
-                         'period, 0 to turn rotation off')
+                    help='for `ctl rotate`: the rotation period, 0 to turn rotation off')
     ct.add_argument('--now', action='store_true',
                     help='for `ctl rotate`: also take a new identity at the next pass boundary')
     ct.add_argument('--adapter', help='for `ctl set_adapter`: the interface name')
@@ -2434,18 +2477,14 @@ def main():
             if not a.path:
                 print('ctl import needs --path'); return 2
             kw = {'path': os.path.abspath(a.path), 'replace': a.replace}
-        elif a.command == 'forget':
+        elif a.command in ('forget', 'unfilter'):
             kw = {'mac': a.mac} if a.mac else {}
-        elif a.command in ('block', 'unblock', 'cooldown'):
+        elif a.command in ('block', 'unblock'):
             if not a.mac:
                 print('ctl %s needs --mac' % a.command); return 2
             kw = {'mac': a.mac}
             if a.command == 'block':
                 kw['note'] = a.note
-            if a.command == 'cooldown':
-                if a.seconds is None:
-                    print('ctl cooldown needs --seconds'); return 2
-                kw['seconds'] = a.seconds
         elif a.command == 'title_remove':
             if not a.title:
                 print('ctl title_remove needs --title'); return 2
@@ -2483,6 +2522,9 @@ def main():
         print(json.dumps(send_command(control_socket_path(a.store), a.command, **kw),
                          indent=2))
         return 0
+    if a.cooldown is not None:
+        print('--cooldown is no longer used: a console that has exchanged with this relay is '
+              'refused until it presents a new MAC, as a 3DS does', file=sys.stderr)
     # Before the umask, so the desktop user can still reach the control socket inside it.
     os.makedirs(a.store, exist_ok=True)
     os.umask(0o077)

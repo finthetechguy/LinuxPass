@@ -102,7 +102,7 @@ def _selftest():
         chk('and a different store is a different identity',
             derive(os.path.join(tmp, 'other'))['mac'] != a['mac'])
         import sp_relay
-        ns = argparse.Namespace(store=sp, cooldown=1.0, mac=None, rotate_identity=False,
+        ns = argparse.Namespace(store=sp, mac=None, rotate_identity=False,
                                 start_paused=True, iface='none', channel='1', window=1,
                                 verbose=0, idle=1, pcap=False, exchange_gap=0.0, keep_runs=50,
                                 max_iface_failures=3)
