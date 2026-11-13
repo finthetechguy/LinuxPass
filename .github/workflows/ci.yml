@@ -46,6 +46,7 @@ jobs:
           python linuxpass/sp_smdh.py --selftest
           python linuxpass/sp_yysession.py --selftest
           python linuxpass/sp_savefs.py --selftest
+          python linuxpass/sp_cecexport.py --selftest
           python linuxpass/sp_probe_tx.py --selftest
           python linuxpass/sp_aes.py --selftest
           python linuxpass/sp_identity.py selftest
