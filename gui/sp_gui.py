@@ -392,7 +392,7 @@ class HomePage(Page):
                   % (s['exchanges'], s['passes'])))
         g.add(row('Uptime', human_secs(s['uptime_s'])))
         g.add(row('Last console', s['last_peer'] or '—'))
-        g.add(row('Peers on a cooldown', '%d' % len(s['peers'])))
+        g.add(row('MAC filter', '%d of %d consoles' % (s['filtered'], s['filter_max'])))
         if s['last_error']:
             g.add(row('Last error', s['last_error'], css='error'))
 
@@ -424,10 +424,6 @@ class HomePage(Page):
             nxt = s.get('next_rotation_s')
             sub = ('at the end of this listening pass' if nxt == 0
                    else 'next change in %s' % human_secs(nxt)) if nxt is not None else 'on'
-            cd = s.get('cooldown_s') or 0
-            if cd and cur < cd:
-                sub += ', but our own %s cooldown still holds off a console we have met' \
-                       % human_secs(cd)
         r = row('Change the MAC', sub)
         dd = Gtk.DropDown.new_from_strings(labels)
         dd.set_valign(Gtk.Align.CENTER)
@@ -656,9 +652,9 @@ class DenylistPage(Page):
         rep, why = data
         if rep is None:
             return 'offline:%s' % why
-        d = {'blocked': rep['blocked'],
-             'cooldowns': [{**c, 'remaining_s': human_secs(c['remaining_s'])}
-                           for c in rep['cooldowns']]}
+        d = {'blocked': rep['blocked'], 'filter': rep['filter'],
+             'backing_off': [{**c, 'remaining_s': human_secs(c['remaining_s'])}
+                             for c in rep['backing_off']]}
         return json.dumps(d, sort_keys=True, default=str)
 
     def _draw(self, res):
@@ -671,7 +667,7 @@ class DenylistPage(Page):
 
         g = self.group('Blocked consoles',
                        'LinuxPass refuses to exchange with these consoles until you unblock '
-                       'them. A cooldown only delays the next exchange.')
+                       'them, whatever MAC they use.')
         b = Gtk.Button(label='Block a console…', halign=Gtk.Align.END, valign=Gtk.Align.CENTER,
                        margin_bottom=6)
         b.connect('clicked', lambda *_a: self.app.dialog_block())
@@ -685,32 +681,37 @@ class DenylistPage(Page):
                                      lambda m=e['mac']: self.app.act('unblock', mac=m)))
             g.add(r)
 
-        g = self.group('Cooldowns',
-                       'After an exchange, a console is left alone for a while. This is keyed '
-                       "on its MAC, which a 3DS rotates. The console's own limit is keyed on "
-                       'our MAC and is the stricter one.')
-        if not rep['cooldowns']:
-            g.add(row('No consoles met yet', ''))
-        for e in rep['cooldowns']:
-            rem = e['remaining_s']
-            r = row(e['mac'],
-                    ('due now' if rem <= 0 else 'due in %s' % human_secs(rem))
-                    + '   ·   %d exchange(s)' % e['exchanges']
-                    + ('   ·   %d failed attempt(s)' % e['attempts'] if e['attempts'] else ''))
+        g = self.group('MAC filter',
+                       'Like a 3DS, LinuxPass refuses a MAC once it has exchanged with it, and '
+                       'meets that console again when it presents a new MAC. The newest %d are '
+                       'kept; removing one lets it exchange again.' % rep['filter_max'])
+        if rep['filter']:
+            b = Gtk.Button(label='Clear filter', valign=Gtk.Align.CENTER, margin_bottom=6)
+            b.connect('clicked', lambda *_a: self.app.dialog_clear_filter(len(rep['filter'])))
+            g.set_header_suffix(b)
+        else:
+            g.add(row('The filter is empty', 'No console has exchanged with this relay yet.'))
+        for e in rep['filter']:
+            r = row(e['mac'], '%d exchange(s)' % e['exchanges']
+                    + ('   ·   last %s' % time.strftime('%d %b %H:%M', time.localtime(e['last']))
+                       if e.get('last') else ''))
             box = Gtk.Box(spacing=6, valign=Gtk.Align.CENTER)
-            if rem > 0:
-                bb = Gtk.Button(label='Clear')
-                bb.connect('clicked',
-                           lambda _b, m=e['mac']: self.app.act('cooldown', mac=m, seconds=0))
-                box.append(bb)
-            bb = Gtk.Button(label='Set…')
-            bb.connect('clicked', lambda _b, m=e['mac'], v=rem: self.app.dialog_cooldown(m, v))
-            box.append(bb)
+            box.append(icon_button('list-remove-symbolic', 'Remove from the filter',
+                                   lambda m=e['mac']: self.app.act('unfilter', mac=m,
+                                                                   then='Removed from the filter')))
             box.append(icon_button('action-unavailable-symbolic', 'Block this console',
                                    lambda m=e['mac']: self.app.act('block', mac=m,
                                                                    note='blocked from the GUI')))
             r.add_suffix(box)
             g.add(r)
+
+        if rep['backing_off']:
+            g = self.group('Retrying soon',
+                           'These consoles engaged but nothing moved. LinuxPass leaves them '
+                           'alone briefly so a pass can reach a different console.')
+            for e in rep['backing_off']:
+                g.add(row(e['mac'], 'retry in %s   ·   %d failed attempt(s)'
+                          % (human_secs(e['remaining_s']), e['attempts'])))
 
 
 class LogPage(Page):
@@ -892,17 +893,15 @@ class RelayApp(Adw.Application):
         d.connect('response', resp)
         d.present(self.win)
 
-    def dialog_cooldown(self, mac, current):
-        adj = Gtk.Adjustment(value=max(0, current) / 60.0, lower=0, upper=48 * 60,
-                             step_increment=5, page_increment=60)
-        sp = Gtk.SpinButton(adjustment=adj, digits=0)
-        d = Adw.AlertDialog(heading='Time remaining for %s' % mac,
-                            body='Minutes until this relay will engage it again. Zero means now.')
-        d.set_extra_child(sp)
+    def dialog_clear_filter(self, n):
+        d = Adw.AlertDialog(heading='Clear the MAC filter?',
+                            body='All %d console(s) in it will be able to exchange with this '
+                                 'relay again on the MAC they used before.' % n)
         d.add_response('cancel', 'Cancel')
-        d.add_response('ok', 'Set')
-        d.connect('response', lambda _d, r: r == 'ok' and self.act(
-            'cooldown', then='Cooldown updated', mac=mac, seconds=sp.get_value() * 60.0))
+        d.add_response('ok', 'Clear')
+        d.set_response_appearance('ok', Adw.ResponseAppearance.DESTRUCTIVE)
+        d.connect('response', lambda _d, r: r == 'ok' and self.act('unfilter',
+                                                                   then='Filter cleared'))
         d.present(self.win)
 
     def dialog_identity(self):
