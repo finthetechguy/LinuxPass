@@ -25,7 +25,8 @@ HDR_LEN = sp_cec.HDR_LEN
 BOXINFO_HDR = 0x20
 BOXINFO_MAGIC = b'bb'
 INBOX = sp_store.BOXES['inbox']
-EMULATOR_DIRS = ('azahar-emu', 'azaharplus-emu', 'citra-emu', 'lime3ds-emu')
+EMULATOR_DIRS = {'azahar-emu': 'Azahar', 'azaharplus-emu': 'AzaharPlus', 'citra-emu': 'Citra',
+                 'lime3ds-emu': 'Lime3DS'}
 EMULATOR_PROCESSES = ('azahar', 'azahar-qt', 'azahar-room', 'azaharplus', 'citra', 'citra-qt',
                       'lime3ds', 'lime3ds-qt')
 CEC_SUBPATH = os.path.join('sysdata', '00010026', '00000000', 'CEC')
@@ -102,14 +103,15 @@ def resolve(path):
 def find_emulators(home=None):
     """-> [(name, CEC dir)] for every installed 3DS emulator whose CEC save exists."""
     home = home or os.path.expanduser('~')
-    bases = [os.environ.get('XDG_DATA_HOME') or os.path.join(home, '.local', 'share')]
-    bases += glob.glob(os.path.join(home, '.var', 'app', '*', 'data'))
+    bases = [(os.environ.get('XDG_DATA_HOME') or os.path.join(home, '.local', 'share'), '')]
+    bases += [(d, ' (Flatpak)') for d in sorted(glob.glob(os.path.join(home, '.var', 'app', '*',
+                                                                       'data')))]
     out = []
-    for base in bases:
-        for name in EMULATOR_DIRS:
-            d = resolve(os.path.join(base, name))
+    for base, how in bases:
+        for sub, name in EMULATOR_DIRS.items():
+            d = resolve(os.path.join(base, sub))
             if d and d not in [x for _n, x in out]:
-                out.append((name.replace('-emu', '').capitalize(), d))
+                out.append((name + how, d))
     return out
 
 

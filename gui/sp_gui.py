@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """A GTK4 / libadwaita front end for LinuxPass."""
-import os, sys, json, time, threading, subprocess, argparse
+import os, sys, json, time, base64, threading, subprocess, argparse
 
 import gi
 gi.require_version('Gtk', '4.0')
@@ -632,6 +632,11 @@ class InboxPage(StorePage):
     def header(self, st, titles):
         g = self.group('Received from consoles',
                        'CEC data received from consoles in successful exchanges.')
+        b = Gtk.Button(label='Export', valign=Gtk.Align.CENTER, margin_bottom=6,
+                       tooltip_text='Deliver these messages to an emulator, or copy them out')
+        b.set_sensitive(bool(titles))
+        b.connect('clicked', lambda _b: self.app.dialog_export())
+        g.set_header_suffix(b)
         if not titles:
             g.add(row('Nothing received yet', 'Messages land here after an exchange.'))
 
@@ -969,6 +974,82 @@ class RelayApp(Adw.Application):
                 'set_store', then='Store saved. Restart the service to use it.', path=path))
             d.present(self.win)
         chooser.select_folder(self.win, None, on_folder)
+
+    def dialog_export(self):
+        import sp_cecexport as ex
+        emus = ex.find_emulators()
+        if emus:
+            home = os.path.expanduser('~')
+            short = [d.split(os.sep + 'nand' + os.sep)[0] for _n, d in emus]
+            where = '\n'.join('%s: %s' % (n, '~' + d[len(home):] if d.startswith(home + '/')
+                                           else d) for (n, _d), d in zip(emus, short))
+            body = ('Deliver puts every received message into the emulator\'s StreetPass '
+                    'inboxes, as if it had arrived there. Only titles whose game has been '
+                    'started there with StreetPass on can take messages. The emulator must be '
+                    'closed, and its CEC data is backed up first.\n\n%s\n\n' % where)
+        else:
+            body = 'No 3DS emulator with CEC data was found.\n\n'
+        body += ('Choose a folder to deliver into a CEC folder there, or, for any other '
+                 'folder, to copy the messages out unchanged.')
+        d = Adw.AlertDialog(heading='Export received messages', body=body)
+        d.add_response('cancel', 'Cancel')
+        d.add_response('folder', 'Choose folder…')
+        for i, (name, _path) in enumerate(emus):
+            d.add_response('emu%d' % i, 'Deliver to %s' % name)
+        if emus:
+            d.set_response_appearance('emu0', Adw.ResponseAppearance.SUGGESTED)
+
+        def on_folder(dlg, res):
+            try:
+                path = dlg.select_folder_finish(res).get_path()
+            except GLib.Error:
+                return
+            if path:
+                self._export(path, raw=ex.resolve(path) is None)
+
+        def resp(_d, r):
+            if r == 'folder':
+                Gtk.FileDialog(title='Export received messages to').select_folder(
+                    self.win, None, on_folder)
+            elif r.startswith('emu'):
+                self._export(emus[int(r[3:])][1])
+        d.connect('response', resp)
+        d.present(self.win)
+
+    def _export(self, dest, raw=False):
+        import sp_cecexport as ex
+
+        def work():
+            rep = self.daemon.call('inbox')
+            if not rep.get('ok'):
+                raise RuntimeError(rep.get('error') or 'the daemon closed the connection')
+            msgs = [(base64.b64decode(m['data']), m.get('when'))
+                    for m in rep['messages']]
+            if raw:
+                return 'Copied %d message(s) to %s.' % (len(ex.write_raw(msgs, dest)), dest)
+            running = ex.emulator_running()
+            if running:
+                raise RuntimeError('%s is running, and would overwrite the messages when it '
+                                   'exits. Close it and export again.' % running)
+            folder = ex.CecFolder(dest)
+            backup = folder.backup(ex.default_backup_dir())
+            notes = []
+            counts = ex.deliver_all(folder, msgs, log=notes.append)
+            text = 'Delivered %d message(s).' % counts.get(ex.ADDED, 0)
+            if counts.get(ex.DUPLICATE):
+                text += ' %d were already there.' % counts[ex.DUPLICATE]
+            if notes:
+                text += '\n\nNot delivered:\n' + '\n'.join(n.strip() for n in notes[:12])
+                if len(notes) > 12:
+                    text += '\n…and %d more' % (len(notes) - 12)
+            return text + '\n\nBackup of the previous CEC data: %s' % backup
+
+        def done(res):
+            if isinstance(res, Exception):
+                self.error('Export failed', str(res))
+            else:
+                self.error('Export finished', res)
+        run_async(work, done)
 
     def dialog_import(self):
         chooser = Gtk.FileDialog(title='Import CEC data')
