@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """LinuxPass: a daemon that exchanges with any 3DS that passes."""
 import contextlib, os, sys, json, time, socket, stat, struct, threading, random, argparse, re, pwd
+import base64
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sp_store, sp_cecstore, sp_cec, sp_harvest_air, sp_build
@@ -414,6 +415,34 @@ def import_into(store, path, log=print, replace=False):
     return n
 
 
+def received_messages(store, titles=None):
+    """-> [(container, when received)] for everything in the store's inbox."""
+    og = store.origins()
+    out = []
+    for t, _b, c in store.messages(box='inbox'):
+        if titles and t not in titles:
+            continue
+        when = (og.get(store._okey(c[0x20:0x28], 'inbox')) or {}).get('when')
+        if when is None:
+            try:
+                when = os.path.getmtime(os.path.join(store._box_dir(t, 'inbox'),
+                                                     sp_store.message_filename(c)))
+            except OSError:
+                when = None
+        out.append((c, when))
+    return out
+
+
+def parse_titles(values):
+    """['00020800', ...] -> [0x00020800, ...]; raises ValueError on anything else."""
+    out = []
+    for v in values or ():
+        if not re.fullmatch(r'(0x)?[0-9a-fA-F]{1,8}', str(v)):
+            raise ValueError('a title is up to 8 hex digits, got %r' % v)
+        out.append(int(str(v), 16))
+    return out
+
+
 def backfill_air_provenance(store, book, log=print):
     """Stamp messages the peer book knows a console gave us, but the store has no origin for."""
     known = {}
@@ -443,6 +472,72 @@ def import_from_log(store, log_path, log=print):
         n += 1
     log('  imported %d message(s) off the air from %s' % (n, log_path))
     return n
+
+
+def messages_for_export(store_path, titles=None):
+    """Received messages, read from the store directly or, without the rights, from the daemon."""
+    if os.access(os.path.join(store_path, 'CEC'), os.R_OK | os.X_OK):
+        return received_messages(sp_store.Store(store_path), titles)
+    sock = control_socket_path(store_path)
+    if os.path.exists(sock):
+        rep = send_command(sock, 'inbox', titles=['%08x' % t for t in titles or ()])
+        if not rep.get('ok'):
+            raise RuntimeError(rep.get('error') or 'the daemon refused')
+        return [(base64.b64decode(m['data']), m.get('when')) for m in rep['messages']]
+    raise PermissionError('cannot read the store at %s and no daemon is answering there; '
+                          're-run with sudo' % store_path)
+
+
+def export_main(a):
+    import sp_cecexport as ex
+    try:
+        titles = parse_titles(a.title)
+        msgs = messages_for_export(a.store, titles)
+    except (OSError, RuntimeError, ValueError) as e:
+        print(e)
+        return 1
+    print('%d received message(s) in the store' % len(msgs))
+    if a.raw:
+        if not a.dest:
+            print('export --raw needs a destination folder'); return 2
+        for p in ex.write_raw(msgs, a.dest):
+            print('  wrote %s' % p)
+        return 0
+    user = os.environ.get('SUDO_USER') if os.geteuid() == 0 else None
+    home = pwd.getpwnam(user).pw_dir if user else None
+    if a.dest:
+        dest = a.dest
+    else:
+        found = ex.find_emulators(home)
+        if not found:
+            print('no 3DS emulator CEC data found; start the emulator once, or name the folder')
+            return 1
+        if len(found) > 1:
+            print('more than one emulator found; name one:')
+            for name, d in found:
+                print('  %-8s %s' % (name, d))
+            return 2
+        print('emulator: %s, %s' % found[0])
+        dest = found[0][1]
+    try:
+        folder = ex.CecFolder(dest)
+    except ValueError as e:
+        print(e)
+        return 1
+    running = ex.emulator_running()
+    if running and not a.dry_run and not a.force:
+        print('%s is running and would overwrite this on exit; close it first (or --force)'
+              % running)
+        return 1
+    if not a.dry_run and not a.no_backup:
+        print('backed up %s to %s'
+              % (folder.path, folder.backup(a.backup_dir or ex.default_backup_dir(home))))
+    counts = ex.deliver_all(folder, msgs, dry_run=a.dry_run)
+    print('%s %d message(s) to %s; %s' % (
+        'would deliver' if a.dry_run else 'delivered', counts.get(ex.ADDED, 0), folder.path,
+        ', '.join('%d %s' % (n, k) for k, n in sorted(counts.items()) if k != ex.ADDED)
+        or 'nothing skipped'))
+    return 0
 
 
 class Control:
@@ -609,6 +704,15 @@ class Control:
                     sp_identity.seed(r.store, r.a.store, replace=bool(req.get('replace')),
                                      log=r.log, **kw)
                 return {'ok': True, 'servable': len(r.servable())}
+            except Exception as e:
+                return {'ok': False, 'error': '%s: %s' % (type(e).__name__, e)}
+        if cmd == 'inbox':
+            try:
+                titles = parse_titles(req.get('titles'))
+                with r.lock:
+                    msgs = received_messages(r.store, titles)
+                return {'ok': True, 'messages': [
+                    {'data': base64.b64encode(c).decode(), 'when': w} for c, w in msgs]}
             except Exception as e:
                 return {'ok': False, 'error': '%s: %s' % (type(e).__name__, e)}
         if cmd == 'import':
@@ -1682,6 +1786,23 @@ def _selftest():
         write_store_pointer(home, home)
         chk('and moving it back removes the pointer', resolve_store(home) == home
             and not os.path.exists(os.path.join(home, STORE_POINTER)))
+        import sp_build as _spb
+        inb = _spb.build(mii_name='In', greeting='received')
+        inb = inb[inb.find(b'\x60\x60\x00\x00'):]
+        sr.store.add_message(inb, 'inbox', origin='air:ba:ae:6e:00:00:01')
+        sr.store.add_message(inb, 'outbox')
+        rep = sc.handle({'cmd': 'inbox'})
+        chk('the daemon hands over what it received, and only that',
+            rep['ok'] and len(rep['messages']) == 1
+            and base64.b64decode(rep['messages'][0]['data']) == inb, rep.get('error'))
+        chk('with when it arrived', abs(rep['messages'][0]['when'] - time.time()) < 60)
+        chk('a title filter that matches nothing returns nothing',
+            sc.handle({'cmd': 'inbox', 'titles': ['00030600']})['messages'] == [])
+        chk('a malformed title is refused', not sc.handle({'cmd': 'inbox', 'titles': ['zz']})['ok'])
+        got = messages_for_export(sr.a.store, [0x00020800])
+        chk('export reads the same from the store directly', [c for c, _w in got] == [inb])
+        chk('parse_titles takes hex with or without 0x',
+            parse_titles(['00020800', '0x1a0400']) == [0x00020800, 0x001a0400])
         chk('a foreground daemon refuses to save an adapter',
             not Control(os.path.join(tmp, 'unused4.sock'), r).handle(
                 {'cmd': 'set_adapter', 'name': 'wlp3s0'})['ok'])
@@ -2220,6 +2341,23 @@ def main():
                      help='empty the outbox first, so this becomes the only data the relay '
                           'serves. Use it when swapping in another console\'s data.')
 
+    exp = sub.add_parser('export', help="deliver received messages into an emulator's (or a "
+                                        "console-shaped) CEC folder, as if they arrived there")
+    exp.add_argument('dest', nargs='?',
+                     help='a CEC folder or an emulator user folder (default: the one installed '
+                          'emulator found); with --raw, any folder')
+    exp.add_argument('--store', default='relay_store')
+    exp.add_argument('--title', action='append', metavar='TITLE',
+                     help='only this CEC title, 8 hex digits; may be repeated')
+    exp.add_argument('--raw', action='store_true',
+                     help='write each message unchanged as DEST/<TITLE>/_<id> instead')
+    exp.add_argument('--dry-run', action='store_true', help='say what would happen, change nothing')
+    exp.add_argument('--no-backup', action='store_true',
+                     help='skip archiving the CEC folder before changing it')
+    exp.add_argument('--backup-dir', help='where that archive goes '
+                                          '(default ~/.local/share/linuxpass/cec-backups)')
+    exp.add_argument('--force', action='store_true', help='even while an emulator is running')
+
     st = sub.add_parser('status', help='print the store, or the running daemon if there is one')
     st.add_argument('--store', default='relay_store')
 
@@ -2274,6 +2412,8 @@ def main():
             import_into(s, a.path, replace=a.replace)
         print(s.summary())
         return 0
+    if a.cmd == 'export':
+        return export_main(a)
     if a.cmd == 'status':
         sock = control_socket_path(a.store)
         if os.path.exists(sock):

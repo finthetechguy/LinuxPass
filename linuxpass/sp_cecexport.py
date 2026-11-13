@@ -204,10 +204,22 @@ class CecFolder:
 
     def backup(self, dest_dir):
         """Archive the whole CEC folder into dest_dir. -> the archive's path."""
+        made, d = [], os.path.abspath(dest_dir)
+        while not os.path.exists(d):
+            made.append(d)
+            d = os.path.dirname(d)
         os.makedirs(dest_dir, exist_ok=True)
-        out = os.path.join(dest_dir, time.strftime('CEC-%Y%m%d-%H%M%S.tar.gz'))
+        stem = os.path.join(dest_dir, time.strftime('CEC-%Y%m%d-%H%M%S'))
+        out, n = stem + '.tar.gz', 1
+        while os.path.exists(out):
+            out, n = '%s-%d.tar.gz' % (stem, n), n + 1
         with tarfile.open(out, 'w:gz') as tf:
             tf.add(self.path, arcname='CEC')
+        if os.geteuid() == 0:
+            # Run through sudo, it belongs to whoever owns the emulator's data, not to root.
+            st = os.stat(self.path)
+            for p in made + [out]:
+                os.chown(p, st.st_uid, st.st_gid)
         return out
 
 
@@ -224,7 +236,7 @@ def deliver_all(folder, messages, dry_run=False, log=print):
         h = sp_cec.parse_header(c)
         st = folder.deliver(c, when, dry_run=dry_run)
         counts[st] = counts.get(st, 0) + 1
-        if st != ADDED or dry_run:
+        if st != DUPLICATE and (st != ADDED or dry_run):
             log('  %08X %s: %s' % (h['cec_title_id'], c[0x20:0x28].hex(),
                                    {ADDED: 'would be delivered', DUPLICATE: 'already there',
                                     NO_BOX: 'no inbox for this title there (start its game '
@@ -332,17 +344,20 @@ def _selftest():
         open(os.path.join(cec, 'MBoxList____'), 'wb').write(bytes(ml))
         logged = []
         n = deliver_all(f2, [(msg(0x001a0400, b'G' * 8), 2.0e9), (msg(0x001a0400, b'H' * 8), 1.0e9),
-                             (a, 1.0)], log=logged.append)
-        chk('deliver_all counts each outcome', n == {ADDED: 2, DUPLICATE: 1}, n)
+                             (a, 1.0), (msg(0x00030600, b'I' * 8), 1.0)], log=logged.append)
+        chk('deliver_all counts each outcome', n == {ADDED: 2, DUPLICATE: 1, NO_BOX: 1}, n)
         chk('and delivers oldest first, so the newest is listed first',
             [x[0x20:0x28] for x in f2.inbox(0x001a0400)] == [b'G' * 8, b'H' * 8])
-        chk('it says why a message was not delivered', len(logged) == 1 and 'already' in logged[0])
+        chk('it says why a message was not delivered, but not for each duplicate',
+            len(logged) == 1 and 'no inbox' in logged[0], logged)
 
         arc = f.backup(os.path.join(tmp, 'bk'))
         with tarfile.open(arc) as tf:
             names = tf.getnames()
         chk('a backup archives the whole CEC folder',
             'CEC/MBoxList____' in names and 'CEC/00020800/%s/BoxInfo_____' % INBOX in names)
+        chk('and a second one in the same second does not overwrite it',
+            f.backup(os.path.join(tmp, 'bk')) != arc and len(os.listdir(os.path.join(tmp, 'bk'))) == 2)
 
         raw = write_raw([(a, 1.0)], os.path.join(tmp, 'raw'))
         chk('a raw export writes the message unchanged',
