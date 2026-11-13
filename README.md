@@ -28,11 +28,14 @@ Working end to end:
 ## What it does
 
 - Discovers 3DS consoles on channels 1, 6 and 11 and answers their StreetPass probes.
-- Completes the real handshake, derives the CCMP link key, and holds an encrypted link.
-- Exchanges CEC objects. It sends data you uploaded and receives whatever the
+- **Completes** the real handshake, derives the CCMP link key, and holds an encrypted link.
+- **Exchanges** CEC objects. It sends data you uploaded and receives whatever the
   console offers, for every title both sides have enabled.
 - Keeps received messages in a local store you can inspect.
-- Runs as a systemd daemon/service, with a GTK4 GUI on top.
+- Runs as a **systemd daemon/service**, with a GTK4 **GUI** on top.
+
+#### Extra
+- Build a StreetPass Mii Plaza message.
 
 ## What it does not do
 
