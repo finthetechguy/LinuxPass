@@ -96,6 +96,72 @@ def write_env_key(path, key, value):
         return str(e)
 
 
+def on_off(value):
+    """-> False only for an explicit off. A typo keeps logs on rather than crash-looping the unit."""
+    return str(value).strip().lower() not in ('off', '0', 'no', 'false')
+
+
+def store_problem(path):
+    """-> None if root alone can change `path` and everything above it, else why not.
+
+    The daemon writes the store as root, so a directory a desktop user can swap out from under it
+    would let that user point root's writes anywhere. Same rule as install.sh's root_only."""
+    if not isinstance(path, str) or not os.path.isabs(path):
+        return 'the store must be an absolute path'
+    if not os.path.isdir(path):
+        return '%s is not a directory' % path
+    p = os.path.realpath(path)
+    try:
+        if not os.stat(p).st_mode & 0o001:
+            return ('%s is closed to other users, so the GUI could not reach the control socket '
+                    'in it (chmod 755 it)' % p)
+        while True:
+            st = os.stat(p)
+            if st.st_uid != 0:
+                return '%s is not owned by root' % p
+            if st.st_mode & 0o022:
+                return '%s can be written by users other than root' % p
+            if p == '/':
+                return None
+            p = os.path.dirname(p)
+    except OSError as e:
+        return str(e)
+
+
+# Left in the settings file's directory when the store is elsewhere, so the GUI can follow it.
+STORE_POINTER = 'store_moved_to'
+
+
+def resolve_store(store):
+    """-> where the daemon's store really is, following the pointer a moved store leaves."""
+    store = os.path.abspath(store)
+    try:
+        with open(os.path.join(store, STORE_POINTER)) as f:
+            moved = f.read().strip()
+        if os.path.isabs(moved) and moved != store:
+            return moved
+    except OSError:
+        pass
+    return store
+
+
+def write_store_pointer(home, store):
+    """Point `home` (the settings file's directory) at `store`, or remove the pointer if they match."""
+    p = os.path.join(home, STORE_POINTER)
+    try:
+        if os.path.realpath(home) == os.path.realpath(store):
+            if os.path.exists(p):
+                os.remove(p)
+            return None
+        with open(p + '.tmp', 'w') as f:
+            f.write(os.path.abspath(store) + '\n')
+        os.chmod(p + '.tmp', 0o644)
+        os.replace(p + '.tmp', p)
+        return None
+    except OSError as e:
+        return str(e)
+
+
 def peer_can_read(path, uid):
     """Could `uid` read `path` itself? The daemon is root and must not read on behalf of someone who cannot."""
     if uid == 0:
@@ -485,6 +551,31 @@ class Control:
                 return {'ok': False, 'error': err}
             r.log('  adapter %s will be used from the next service restart' % name)
             return {'ok': True, 'adapter': name}
+        if cmd == 'set_logs':
+            on = req.get('enabled')
+            if not isinstance(on, bool):
+                return {'ok': False, 'error': 'enabled must be true or false'}
+            r.a.run_logs = on
+            r.log('  per-pass logs %s' % ('ON, saved to %s'
+                                          % os.path.join(r.a.store, 'runs') if on else 'OFF'))
+            err = r.save_setting('SP_LOGS', 'on' if on else 'off')
+            if err:
+                return {'ok': False, 'error': 'applied, but not saved for restarts: %s' % err}
+            return {'ok': True, 'run_logs': on}
+        if cmd == 'set_store':
+            path = req.get('path')
+            if not r.settings_file():
+                return {'ok': False, 'error': 'only the systemd service saves settings; '
+                                              'pass --store yourself for a foreground run'}
+            why = store_problem(path)
+            if why:
+                return {'ok': False, 'error': why}
+            path = os.path.realpath(path)
+            err = r.save_setting('SP_STORE', path)
+            if err:
+                return {'ok': False, 'error': err}
+            r.log('  store %s will be used from the next service restart' % path)
+            return {'ok': True, 'store': path}
         if cmd == 'title_remove':
             try:
                 with r.lock:
@@ -700,6 +791,9 @@ class Relay:
     def settings_file(self):
         return getattr(self.a, 'settings_file', None)
 
+    def run_logs(self):
+        return on_off(getattr(self.a, 'run_logs', True))
+
     def save_setting(self, key, value):
         """Keep a setting for the next service start. -> None, or why it could not be saved."""
         path = self.settings_file()
@@ -829,6 +923,9 @@ class Relay:
             'can_save_settings': bool(self.settings_file()),
             'adapter': (read_env_file(self.settings_file()).get('SP_IFACE', '')
                         if self.settings_file() else ''),
+            'run_logs': self.run_logs(),
+            'store_next': (read_env_file(self.settings_file()).get('SP_STORE') or self.a.store
+                           if self.settings_file() else self.a.store),
             'rotate_identity': bool(self.a.rotate_identity),
             'rotate_every_s': self.rotate_seconds(),
             'identity_age_s': round(time.time() - self.identity_since, 1),
@@ -1022,8 +1119,9 @@ class Relay:
         argv = ['--iface', self.a.iface, '--channel', self.a.channel,
                 '--mac', mac, '--secs', str(self.a.window),
                 '--full-sequence', '--mirror-offer', '--verbose', str(self.a.verbose),
-                '--yy-rate', str(getattr(self.a, 'yy_rate', 11.0)),
-                '--log', os.path.join(runs, 'relay_%d.log' % stamp)]
+                '--yy-rate', str(getattr(self.a, 'yy_rate', 11.0))]
+        if self.run_logs():
+            argv += ['--log', os.path.join(runs, 'relay_%d.log' % stamp)]
         argv += recovery_argv(self.a)
         if self.a.pcap:
             argv += ['--pcap', os.path.join(runs, 'relay_%d.pcap' % stamp)]
@@ -1130,6 +1228,11 @@ class Relay:
 
     def run(self):
         sock = control_socket_path(self.a.store)
+        if self.settings_file():
+            err = write_store_pointer(os.path.dirname(os.path.abspath(self.settings_file())),
+                                      self.a.store)
+            if err:
+                self.log('  could not tell the GUI where the store is (%s)' % err)
         ctl = Control(sock, self, owner=getattr(self.a, 'control_user', None))
         ctl.start()
         if self.rotate_seconds() and not self.a.rotate_identity:
@@ -1549,6 +1652,36 @@ def _selftest():
                 not sc.handle({'cmd': 'set_adapter', 'name': bad})['ok'])
         chk('the file still holds only the good value', read_env_file(envp).get('SP_IFACE') == 'wlp3s0'
             and '--evil' not in open(envp).read())
+        chk('per-pass logs are on by default', sr.status()['run_logs'])
+        chk('turning them off is applied and saved',
+            sc.handle({'cmd': 'set_logs', 'enabled': False})['ok'] and not sr.run_logs()
+            and read_env_file(envp).get('SP_LOGS') == 'off')
+        chk('a non-boolean is refused', not sc.handle({'cmd': 'set_logs', 'enabled': 'off'})['ok'])
+        chk('a typo in SP_LOGS keeps logs on', on_off('of') and not on_off('OFF'))
+        sc.handle({'cmd': 'set_logs', 'enabled': True})
+        chk('the store stays put until something sets it', sr.status()['store_next'] == sr.a.store)
+        mine = os.path.join(tmp, 'mine'); os.makedirs(mine); os.chmod(mine, 0o755)
+        for bad, why in ((mine, 'not owned by root' if os.getuid() else None),
+                         ('relative/path', 'absolute'), (os.path.join(tmp, 'nope'), 'directory'),
+                         ('/tmp', 'other than root'), (None, 'absolute')):
+            if why:
+                rep = sc.handle({'cmd': 'set_store', 'path': bad})
+                chk('a store at %r is refused (%s)' % (bad, why),
+                    not rep['ok'] and why in rep['error'], rep)
+        chk('and a refused store is not saved', 'SP_STORE' not in read_env_file(envp))
+        if os.getuid() == 0:
+            rep = sc.handle({'cmd': 'set_store', 'path': '/'})
+            chk('a root-only directory is saved for the next restart',
+                rep['ok'] and read_env_file(envp).get('SP_STORE') == '/'
+                and sr.status()['store_next'] == '/', rep)
+            write_env_key(envp, 'SP_STORE', sr.a.store)
+        home = os.path.join(tmp, 'home'); os.makedirs(home)
+        write_store_pointer(home, os.path.join(tmp, 'elsewhere'))
+        chk('a moved store leaves a pointer the GUI follows',
+            resolve_store(home) == os.path.join(tmp, 'elsewhere'))
+        write_store_pointer(home, home)
+        chk('and moving it back removes the pointer', resolve_store(home) == home
+            and not os.path.exists(os.path.join(home, STORE_POINTER)))
         chk('a foreground daemon refuses to save an adapter',
             not Control(os.path.join(tmp, 'unused4.sock'), r).handle(
                 {'cmd': 'set_adapter', 'name': 'wlp3s0'})['ok'])
@@ -2051,6 +2184,8 @@ def main():
     run.add_argument('--keep-runs', type=int, default=50,
                      help='per-pass logs to keep in <store>/runs (0 = keep everything). A quiet '
                           '180 s pass still writes ~50 kB.')
+    run.add_argument('--run-logs', default='on', metavar='on|off',
+                     help='write a log per listening pass to <store>/runs (default on).')
     run.add_argument('--start-paused', action='store_true')
     run.add_argument('--yy-rate', type=float, default=11.0, metavar='MBPS',
                      help='802.11b rate for the encrypted payload frames (default 11, what two '
@@ -2092,7 +2227,8 @@ def main():
     ct.add_argument('command', choices=['status', 'pause', 'resume', 'toggle', 'stop', 'import',
                                         'forget', 'seed', 'store', 'encounters', 'denylist',
                                         'log', 'block', 'unblock', 'cooldown', 'title_remove',
-                                        'message_remove', 'rotate', 'set_adapter'])
+                                        'message_remove', 'rotate', 'set_adapter', 'set_logs',
+                                        'set_store'])
     ct.add_argument('--store', default='relay_store')
     ct.add_argument('--path', help='for `ctl import`: what to ingest')
     ct.add_argument('--replace', action='store_true',
@@ -2106,6 +2242,8 @@ def main():
     ct.add_argument('--now', action='store_true',
                     help='for `ctl rotate`: also take a new identity at the next pass boundary')
     ct.add_argument('--adapter', help='for `ctl set_adapter`: the interface name')
+    ct.add_argument('--logs', choices=['on', 'off'], help='for `ctl set_logs`')
+    ct.add_argument('--new-store', help='for `ctl set_store`: a root-owned directory')
     ct.add_argument('--title', help='for title_remove / message_remove, 8 hex digits')
     ct.add_argument('--id', help='for `ctl message_remove`: the message id, 16 hex digits')
     ct.add_argument('--box', default='outbox', choices=['inbox', 'outbox'])
@@ -2187,6 +2325,14 @@ def main():
             if not a.adapter:
                 print('ctl set_adapter needs --adapter'); return 2
             kw = {'name': a.adapter}
+        elif a.command == 'set_logs':
+            if not a.logs:
+                print('ctl set_logs needs --logs on|off'); return 2
+            kw = {'enabled': a.logs == 'on'}
+        elif a.command == 'set_store':
+            if not a.new_store:
+                print('ctl set_store needs --new-store'); return 2
+            kw = {'path': os.path.abspath(a.new_store)}
         elif a.command in ('encounters', 'log') and a.limit:
             kw = {'limit': a.limit}
         elif a.command == 'seed':

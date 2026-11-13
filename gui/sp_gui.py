@@ -89,9 +89,16 @@ class Daemon:
     """Everything the GUI can ask of the outside world. All calls are blocking; use run_async."""
 
     def __init__(self, store):
-        self.store = os.path.abspath(store)
+        self.home = os.path.abspath(store)
+
+    @property
+    def store(self):
+        return sp_relay.resolve_store(self.home)
+
+    @property
+    def sock(self):
         # sp_relay owns this path, because a deep store puts the socket elsewhere.
-        self.sock = sp_relay.control_socket_path(self.store)
+        return sp_relay.control_socket_path(self.store)
 
     def call(self, cmd, **kw):
         return sp_relay.send_command(self.sock, cmd, **kw)
@@ -373,9 +380,10 @@ class HomePage(Page):
         g.add(row('MAC presented', s['identity']))
         g.add(row('Identity mode', self._identity_mode(s)))
         g.add(self._rotation_row(s))
-        g.add(row('Store', s['store']))
 
         g = self.group('Data')
+        g.add(self._store_row(s))
+        g.add(self._logs_row(s))
         g.add(row('Messages this relay will serve', '%d' % s['servable']))
         g.add(row('Held', '%d' % s['held_but_never_served']))
 
@@ -437,6 +445,32 @@ class HomePage(Page):
         self.app.act('rotate', then=('The MAC will now stay fixed' if not n
                                      else 'The MAC will change every %s' % human_secs(n)),
                      seconds=n)
+
+    def _store_row(self, s):
+        nxt = s.get('store_next') or s['store']
+        r = row('Store', s['store'] if nxt == s['store']
+                else '%s (restart service to take effect)' % (nxt))
+        b = Gtk.Button(label='Change', valign=Gtk.Align.CENTER)
+        b.set_sensitive(s.get('can_save_settings', False) and not self.busy)
+        if not s.get('can_save_settings', False):
+            b.set_tooltip_text('only the systemd service can save this')
+        b.connect('clicked', lambda _b: self.app.dialog_store(s['store']))
+        r.add_suffix(b)
+        return r
+
+    def _logs_row(self, s):
+        on = bool(s.get('run_logs', True))
+        sw = Gtk.Switch(active=on, valign=Gtk.Align.CENTER)
+        sw.connect('state-set', self._logs_toggle)
+        r = row('Logs', 'saving logs to store' if on else 'disabled')
+        r.add_suffix(sw)
+        r.set_activatable_widget(sw)
+        return r
+
+    def _logs_toggle(self, _sw, want):
+        self.app.act('set_logs', then='Logs %s' % ('saved to the store' if want else 'disabled'),
+                     enabled=bool(want))
+        return False
 
     def _toggle(self, sw, want):
         run_async(lambda: self.app.daemon.call('resume' if want else 'pause'),
@@ -912,6 +946,29 @@ class RelayApp(Adw.Application):
             self.act('seed', then='Identity written to the outbox', **kw)
         d.connect('response', resp)
         d.present(self.win)
+
+    def dialog_store(self, current):
+        chooser = Gtk.FileDialog(title='Choose a store directory')
+        chooser.set_initial_folder(Gio.File.new_for_path(current))
+
+        def on_folder(dlg, res):
+            try:
+                path = dlg.select_folder_finish(res).get_path()
+            except GLib.Error:
+                return
+            if not path or os.path.realpath(path) == os.path.realpath(current):
+                return
+            d = Adw.AlertDialog(
+                heading='Use this store?',
+                body='%s\n\nChanges will apply when the service is restarted. The directory '
+                     'must be owned and only writable by root.' % path)
+            d.add_response('cancel', 'Cancel')
+            d.add_response('use', 'Use this store')
+            d.set_response_appearance('use', Adw.ResponseAppearance.SUGGESTED)
+            d.connect('response', lambda _d, r: r == 'use' and self.act(
+                'set_store', then='Store saved. Restart the service to use it.', path=path))
+            d.present(self.win)
+        chooser.select_folder(self.win, None, on_folder)
 
     def dialog_import(self):
         chooser = Gtk.FileDialog(title='Import CEC data')
