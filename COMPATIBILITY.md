@@ -23,11 +23,11 @@ _If your adapter is not listed, it is unlikely to work, although you can test an
 <details>
 <summary>Active monitor vs Mixed</summary>
 <br>
-<b>Active monitor</b>
+<b>Active monitor:</b>
 The driver can make one monitor interface both inject frames and ACK the peer.
 It can also change channel (1, 6, 11) for some drivers, if not, it defaults to channel 1.
 
-<b>Mixed</b>
+<b>Mixed:</b>
 Two virtual interfaces are created on the same adapter. A monitor interface that sends and listens, and an unconnected station interface which carries Tuxchange's own MAC address to the hardware ACKs the console's frames.
 It can only stay on channel 1.
 </details>
