@@ -123,7 +123,7 @@ work around this, it is off by default.
 
 StreetPass on the 3DS has a requirement that the chipset must ACK the console's frames within
 10 microseconds, and only hardware can do that, e.g. the `ath9k` with the Linux kernel gives us control 
-of that, while many other chipsets cannot. See [Hardware]([Skip to getting started with Tuxchange](https://github.com/finthetechguy/Tuxchange/wiki/Hardware))
+of that, while many other chipsets cannot. See [Hardware](https://github.com/finthetechguy/Tuxchange/wiki/Hardware)
 for potentially supported chipsets.
 
 ## Documentation
