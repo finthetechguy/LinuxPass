@@ -13,7 +13,7 @@ This is a hobby project and yet a completely stable solution, I likely won't be 
 reports or pull requests, if you have changes, make a fork.
 
 Tuxchange does successfully exchange against retail consoles many times, but it
-has rough edges. Only one Wi-Fi chipset has been tested (`ath9k`)
+has rough edges. Only one Wi-Fi chipset has been tested (`ath9k`).
 
 Working end to end:
 
@@ -48,7 +48,7 @@ Working end to end:
 
 | | |
 |---|---|
-| Radio | An `ath9k` card that supports active monitor mode. |
+| Radio | An Wi-Fi chipset that supports active monitor mode. |
 | Console | Any 3DS-family console. Exchanging does not require homebrew, but dumping the keys needs GodMode9. |
 
 Active monitor mode matters because the card must send hardware ACKs for the console's frames.
@@ -119,11 +119,12 @@ The 3DS has a MAC filter, which prevents exchanging with the same MAC address ag
 are homebrew tools to clear this filter however. Tuxchange can rotate its MAC address to
 work around this, it is off by default.
 
-### Why only Linux + `ath9k` chipset?
+### Why only Linux + specific chipsets?
 
 StreetPass on the 3DS has a requirement that the chipset must ACK the console's frames within
-10 microseconds, and only hardware can do that, the `ath9k` with the Linux kernel gives us control 
-of that, while mostly every other chipset cannot.
+10 microseconds, and only hardware can do that, e.g. the `ath9k` with the Linux kernel gives us control 
+of that, while many other chipsets cannot. See [Hardware]([Skip to getting started with Tuxchange](https://github.com/finthetechguy/Tuxchange/wiki/Hardware))
+for potentially supported chipsets.
 
 ## Documentation
 
