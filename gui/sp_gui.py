@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """A GTK4 / libadwaita front end for Tuxchange."""
-import os, sys, json, time, base64, threading, subprocess, argparse
+import os, sys, json, time, base64, threading, subprocess, argparse, re
 
 import gi
 gi.require_version('Gtk', '4.0')
@@ -31,30 +31,37 @@ ROTATE_CHOICES = ((0, 'Never'), (3600, 'Every hour'), (4 * 3600, 'Every 4 hours'
                   (24 * 3600, 'Every day'))
 
 
-_active_monitor_cache = {}
+_radio_mode_cache = {}
 
 
-def can_active_monitor(name, drv):
-    """Whether the adapter's radio will ACK frames addressed to a monitor vif. Cached per phy."""
+def radio_mode(name):
+    """How the service would run this adapter: 'active' (an active monitor vif ACKs for us),
+    'mixed' (a plain monitor plus the station vif, which ACKs), or None. Cached per phy."""
     try:
         with open(os.path.join('/sys/class/net', name, 'phy80211', 'name')) as f:
             phy = f.read().strip()
     except OSError:
-        return False
-    if phy not in _active_monitor_cache:
+        return None
+    if phy not in _radio_mode_cache:
         try:
             r = subprocess.run(['iw', 'phy', phy, 'info'], capture_output=True, text=True,
                                timeout=10)
-            _active_monitor_cache[phy] = 'supports active monitor' in r.stdout
         except (OSError, subprocess.SubprocessError):
-            return False
-    return _active_monitor_cache[phy]
+            return None
+        if 'supports active monitor' in r.stdout:
+            _radio_mode_cache[phy] = 'active'
+        elif re.search(r'^\s+\* monitor$', r.stdout, re.M):
+            _radio_mode_cache[phy] = 'mixed'
+        else:
+            _radio_mode_cache[phy] = None
+    return _radio_mode_cache[phy]
 
 
 def wireless_ifaces():
-    """-> [(name, driver, usable)] for every real wireless adapter, monitor vifs excluded.
+    """-> [(name, driver, mode)] for every real wireless adapter, monitor vifs excluded.
 
-    Usable adapters (active monitor) come first, ath9k, the tested driver, ahead of the rest."""
+    Active monitor adapters come first, ath9k, the tested driver, ahead of the rest; then
+    mixed-mode ones; then any that cannot run a monitor at all."""
     out = []
     try:
         names = sorted(os.listdir('/sys/class/net'))
@@ -75,8 +82,9 @@ def wireless_ifaces():
         except OSError:
             drv = ''
         drv = '' if drv in ('driver', '') else drv
-        out.append((n, drv, can_active_monitor(n, drv)))
-    out.sort(key=lambda t: (not t[2], t[1] != 'ath9k', t[0]))
+        out.append((n, drv, radio_mode(n)))
+    rank = {'active': 0, 'mixed': 1}
+    out.sort(key=lambda t: (rank.get(t[2], 2), t[1] != 'ath9k', t[0]))
     return out
 
 
@@ -324,10 +332,12 @@ class HomePage(Page):
         chosen = s.get('adapter', '')
         names = [n for n, _d, _u in ifaces]
         labels = []
-        for n, d, usable in ifaces:
+        for n, d, mode in ifaces:
             notes = [d] if d else []
-            if not usable:
-                notes.append('no active monitor')
+            if mode == 'mixed':
+                notes.append('mixed mode')
+            elif mode is None:
+                notes.append('no monitor mode')
             labels.append('%s  (%s)' % (n, ', '.join(notes)) if notes else n)
         # A saved adapter that is absent right now must stay listed, or the row would show another.
         if chosen and chosen not in names:
