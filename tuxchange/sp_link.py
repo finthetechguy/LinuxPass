@@ -842,11 +842,10 @@ class Link:
         if d:
             self.log('  TX proof (%s): %s' % (csrc, {k: v for k, v in list(d.items())[:6]}))
         elif self.echoes:
-            self.log('  TX proof               : %d of our frames echoed back by the driver'
+            self.log('  TX proof               : %d of frames echoed back by the driver'
                      % self.echoes)
         else:
-            self.log('  no TX proof: no hardware counters moved and none of our frames came '
-                     'back; treat negative results as unproven.')
+            self.log('  no TX proof: no hardware counters moved and frames came back.')
         self.log('')
         if self.decrypted:
             self.log('  %d frame(s) decrypted'

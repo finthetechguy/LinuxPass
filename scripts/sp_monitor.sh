@@ -105,17 +105,17 @@ case "$ACTION" in
 up)
   if [ -z "$IFACE" ]; then
     IFACE=$(pick_iface)
-    [ -n "$IFACE" ] || { echo "no usable adapter found (active monitor, or an unconnected one for mixed mode), so no adapter was touched; name one with SP_IFACE="; exit 1; }
-    echo "using $IFACE (set SP_IFACE to pin a different adapter)"
+    [ -n "$IFACE" ] || { echo "no usable adapter found (active monitor or mixed mode); name an adapter with SP_IFACE="; exit 1; }
+    echo "using $IFACE (set SP_IFACE to use a different adapter)"
   fi
   if ! timeout 10 iw dev "$IFACE" info >/dev/null 2>&1; then
     ALT=$(pick_iface)
     if [ -z "$ALT" ]; then
-      echo "no such wireless interface: $IFACE, and no usable adapter to use instead"
+      echo "no such wireless interface: $IFACE, no usable adapter to use instead"
       iw dev | sed -n 's/^\tInterface /  /p'; exit 1
     fi
     echo "WARNING: no such wireless interface: $IFACE, falling back to $ALT"
-    echo "         pin it with SP_IFACE=$ALT if this is the adapter you want"
+    echo "         set SP_IFACE=$ALT if this is the adapter you want instead"
     IFACE=$ALT
   fi
   printf '%s\n' "$IFACE" >"$RUN_IFACE" 2>/dev/null || true

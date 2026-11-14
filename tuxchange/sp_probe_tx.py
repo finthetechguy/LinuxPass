@@ -367,11 +367,11 @@ class Runner:
     def report_tx(self, before, after, csrc, echoes=0):
         d = diff_counters(before, after)
         if not d and echoes:
-            self.log('  TX proof: %d of our frames echoed back by the driver after sending'
+            self.log('  TX proof: %d of frames echoed back by the driver after sending'
                      % echoes)
             return True
         if not d:
-            self.log('  TX counters did not move and none of our frames came back, so the radio')
+            self.log('  TX counters did not move and no frames came back! The radio')
             self.log('    may not be transmitting at all.')
             self.log('    Treat any negative result below as unproven until this is fixed.')
             return False
@@ -399,8 +399,8 @@ class Runner:
             self.log('     Injection, addressing, channel and rate are all proven good.')
         else:
             self.log('  RUNG 1a no ACK.')
-            self.log('     If TX was proven, our frames are on the air but no console')
-            self.log('     acknowledged: it was off-channel, asleep, or out of range.')
+            self.log('     If TX was proven, frames are on the air but no console')
+            self.log('     acknowledged.')
         self.log('')
         if engages:
             kinds = sorted({e['name'] for e in engages})

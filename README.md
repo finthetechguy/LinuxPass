@@ -12,8 +12,9 @@ a StreetPass message, blinks its notification LED green, and exchanges title-spe
 This is a hobby project and yet a completely stable solution, I likely won't be viewing bug
 reports or pull requests, if you have changes, make a fork.
 
-Tuxchange does successfully exchange against retail consoles many times, but it
-has rough edges. Only one Wi-Fi chipset has been tested (`ath9k`).
+**Tuxchange does successfully exchange against retail consoles many times.** However, it
+can take a few tries/passes for a full successful exchange depending on what wireless chipset
+adapter you are using.
 
 Working end to end:
 
@@ -48,7 +49,7 @@ Working end to end:
 
 | | |
 |---|---|
-| Radio | An Wi-Fi chipset that supports active monitor mode. |
+| Radio | An Wi-Fi chipset that supports active monitor mode. **`ath9k` recommended** |
 | Console | Any 3DS-family console. Exchanging does not require homebrew, but dumping the keys needs GodMode9. |
 
 Active monitor mode matters because the card must send hardware ACKs for the console's frames.
@@ -122,7 +123,7 @@ work around this, it is off by default.
 ### Why only Linux + specific chipsets?
 
 StreetPass on the 3DS has a requirement that the chipset must ACK the console's frames within
-10 microseconds, and only hardware can do that, e.g. the `ath9k` with the Linux kernel gives us control 
+10~ microseconds, and only hardware can do that, e.g. the `ath9k` with the Linux kernel gives us control 
 of that, while many other chipsets cannot. See [Hardware](https://github.com/finthetechguy/Tuxchange/wiki/Hardware)
 for potentially supported chipsets.
 

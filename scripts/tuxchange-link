@@ -38,7 +38,7 @@ arm_deadman() {
   fi
   [ "$DEADMAN_ARMED" -eq 1 ] \
     && echo "forced reboot armed (+${DEADMAN_MIN} min); cancelled automatically on a clean exit" \
-    || echo "WARNING: could not arm the forced reboot, so a driver hang would need physical access"
+    || echo "WARNING: could not arm the forced reboot!"
 }
 disarm_deadman() {
   [ "$DEADMAN_ARMED" -eq 1 ] || return 0
@@ -115,7 +115,7 @@ else
   mount -t debugfs none /sys/kernel/debug 2>/dev/null
   [ -e "$XMIT" ] \
     && echo "ath9k hardware TX counters: available (mounted debugfs)" \
-    || echo "no hardware TX counters on $PHY; our own frames echoed back will be the TX proof"
+    || echo "no hardware TX counters on $PHY; frames echoed back will be the TX proof"
 fi
 echo
 
