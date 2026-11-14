@@ -60,8 +60,11 @@ install)
   if [ ! -e "$DEFAULTS" ]; then
     cat > "$DEFAULTS" <<EOF
 # Tunables for tuxchange.service. Edit here, then: systemctl restart tuxchange
-# Empty picks an adapter that supports active monitor, preferring ath9k.
+# Empty picks an adapter that supports active monitor, preferring ath9k, else an unconnected
+# adapter for mixed mode.
 SP_IFACE=
+# auto, active or mixed. Mixed mode suits adapters without active monitor support.
+SP_MODE=auto
 SP_MON=mon0
 SP_STORE=$STATE
 SP_CHANNELS=1,6,11

@@ -3,7 +3,7 @@
 #   sudo ./scripts/tuxchange [iface] [channels] [sp_relay.py run arguments]
 set -u
 
-IFACE=${1:-}          # empty: sp_monitor.sh picks an ath9k adapter
+IFACE=${1:-}          # empty: sp_monitor.sh picks a usable adapter
 CH=${2:-1,6,11}
 shift 2 2>/dev/null || shift $# 2>/dev/null
 MON=${SP_MON:-mon0}
@@ -35,7 +35,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-SP_IFACE=$IFACE SP_MON=$MON SP_STORE=$STORE "$HERE/sp_monitor.sh" up || exit 1
+SP_IFACE=$IFACE SP_MON=$MON SP_STORE=$STORE SP_CHANNELS=$CH "$HERE/sp_monitor.sh" up || exit 1
 echo
 echo "control socket: $STORE/relay.sock"
 echo "  $PY $ROOT/tuxchange/sp_relay.py ctl status  --store $STORE"

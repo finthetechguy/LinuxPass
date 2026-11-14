@@ -18,8 +18,11 @@ WorkingDirectory=__ROOT__
 
 # Everything tunable lives here; edit /etc/default/tuxchange, not this file.
 EnvironmentFile=-/etc/default/tuxchange
-# Empty picks the first ath9k adapter. Set it in /etc/default/tuxchange to pin one.
+# Empty picks an adapter that supports active monitor (ath9k first), else an unconnected one
+# for mixed mode. Set it in /etc/default/tuxchange to pin one.
 Environment=SP_IFACE=
+# auto: active monitor when the adapter supports it, mixed mode otherwise; or force active/mixed.
+Environment=SP_MODE=auto
 Environment=SP_MON=mon0
 Environment=SP_STORE=/var/lib/tuxchange
 Environment=SP_CHANNELS=1,6,11
