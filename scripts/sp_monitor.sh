@@ -44,6 +44,10 @@ can_monitor() {
   timeout 10 iw phy "$phy" info 2>/dev/null | grep -qE '^[[:space:]]+\* monitor$'
 }
 
+is_up() {
+  [ $(( $(cat "/sys/class/net/$1/flags" 2>/dev/null || echo 0) & 1 )) -eq 1 ]
+}
+
 is_connected() {
   timeout 10 iw dev "$1" link 2>/dev/null | grep -q '^Connected'
 }
@@ -73,6 +77,14 @@ release_radio() {
   systemctl is-active --quiet NetworkManager || return 0
   if command -v nmcli >/dev/null && timeout 10 nmcli device set "$IFACE" managed no >/dev/null 2>&1; then
     echo "NetworkManager told to leave $IFACE alone"
+    # nmcli returns before NetworkManager and wpa_supplicant finish letting go, and their teardown
+    # resets the MAC and takes the link down, which would undo whatever is set up next.
+    local n=0
+    while [ $n -lt 20 ] && ! timeout 5 nmcli -g GENERAL.STATE device show "$IFACE" 2>/dev/null \
+        | grep -q '^10 '; do
+      sleep 0.25; n=$((n + 1))
+    done
+    sleep 1
     return 0
   fi
   echo "stopping NetworkManager (nmcli could not release $IFACE)"
@@ -124,7 +136,10 @@ up)
   timeout 10 iw dev "$MON" del 2>/dev/null
   if [ "$MODE" = mixed ]; then
     can_monitor "$IFACE" || { echo "$IFACE cannot run a monitor interface"; exit 1; }
-    [ -e "$ORIG_MAC" ] || cat "/sys/class/net/$IFACE/address" >"$ORIG_MAC" 2>/dev/null
+    if [ ! -e "$ORIG_MAC" ]; then
+      PERM=$(ip -o link show dev "$IFACE" 2>/dev/null | sed -n 's/.* permaddr \([0-9a-f:]*\).*/\1/p')
+      printf '%s\n' "${PERM:-$(cat "/sys/class/net/$IFACE/address")}" >"$ORIG_MAC" 2>/dev/null
+    fi
     timeout 15 ip link set "$IFACE" down 2>/dev/null
     if ! timeout 15 iw dev "$IFACE" interface add "$MON" type monitor; then
       echo "could not create a monitor interface on $IFACE"; exit 1
@@ -138,6 +153,14 @@ up)
     timeout 10 ip link set "$IFACE" address "$MAC" || { echo "could not set $IFACE MAC"; exit 1; }
     # Up but never associated: the driver programs our MAC into the chip, which then ACKs it.
     timeout 15 ip link set "$IFACE" up || { echo "could not bring $IFACE up"; exit 1; }
+    # Anything still letting go of the adapter can take it down again; check it stayed up.
+    sleep 2
+    if ! is_up "$IFACE" || [ "$(cat "/sys/class/net/$IFACE/address")" != "$MAC" ]; then
+      echo "$IFACE was taken down or changed behind our back; setting it up again"
+      timeout 15 ip link set "$IFACE" down 2>/dev/null
+      timeout 10 ip link set "$IFACE" address "$MAC" || { echo "could not set $IFACE MAC"; exit 1; }
+      timeout 15 ip link set "$IFACE" up || { echo "could not bring $IFACE up"; exit 1; }
+    fi
     echo "mixed mode: monitor $MON sends and listens, $IFACE up as $MAC (the hardware will ACK frames addressed to it)"
     exit 0
   fi
