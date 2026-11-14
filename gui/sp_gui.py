@@ -31,15 +31,11 @@ ROTATE_CHOICES = ((0, 'Never'), (3600, 'Every hour'), (4 * 3600, 'Every 4 hours'
                   (24 * 3600, 'Every day'))
 
 
-# mt792x firmware ignores active monitor, but kernels before 7.3 still advertise it.
-NO_ACTIVE_MONITOR = frozenset(('mt7921e', 'mt7921u', 'mt7921s', 'mt7925e', 'mt7925u'))
 _active_monitor_cache = {}
 
 
 def can_active_monitor(name, drv):
     """Whether the adapter's radio will ACK frames addressed to a monitor vif. Cached per phy."""
-    if drv in NO_ACTIVE_MONITOR:
-        return False
     try:
         with open(os.path.join('/sys/class/net', name, 'phy80211', 'name')) as f:
             phy = f.read().strip()
