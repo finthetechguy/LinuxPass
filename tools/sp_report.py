@@ -5,7 +5,7 @@ from collections import Counter
 from scapy.all import PcapReader, Dot11, Dot11Elt, RadioTap
 import os as _os, sys as _sys
 _sys.path.insert(0, _os.path.join(
-    _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), 'linuxpass'))
+    _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), 'tuxchange'))
 from sp_parse import parse_vendor_ie, NIN_OUI, is_laa
 
 TITLE_DB = {}

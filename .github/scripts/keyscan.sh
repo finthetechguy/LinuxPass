@@ -16,12 +16,12 @@ fi
 # A cecd HMAC key string as a literal. Only the known throwaway pair is allowed.
 if git grep -hIE 'cecd_hmac_(retail|dev)[[:space:]]*=[[:space:]]*"[^"]+"' -- . \
      ':!.github/scripts/keyscan.sh' \
-   | grep -vE '"(LinuxPassSelfTes|LinuxPassSelfDev)"' \
+   | grep -vE '"(TuxchangeSelfTes|TuxchangeSelfDev)"' \
    | grep -q .; then
   report "a cecd HMAC key string that is not the known throwaway pair is committed:"
   git grep -nIE 'cecd_hmac_(retail|dev)[[:space:]]*=[[:space:]]*"[^"]+"' -- . \
        ':!.github/scripts/keyscan.sh' \
-    | grep -vE '"(LinuxPassSelfTes|LinuxPassSelfDev)"'
+    | grep -vE '"(TuxchangeSelfTes|TuxchangeSelfDev)"'
 fi
 
 # A bare 32-byte key written as hex. The rows of the public AES S-box are the only exception.

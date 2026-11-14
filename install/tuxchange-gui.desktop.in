@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
-Name=LinuxPass
+Name=Tuxchange
 GenericName=StreetPass for the Nintendo 3DS
-Comment=Watch and control the LinuxPass daemon
+Comment=Watch and control the Tuxchange daemon
 Exec=__PY__ __ROOT__/gui/sp_gui.py --store __STORE__
 Icon=network-wireless
 Terminal=false

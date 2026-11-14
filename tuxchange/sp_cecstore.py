@@ -249,7 +249,7 @@ def _selftest():
 
     _share = (os.environ.get('XDG_DATA_HOME')
               or os.path.join(os.path.expanduser('~'), '.local', 'share'))
-    ml = os.environ.get('LINUXPASS_EMU_NAND') or os.path.join(
+    ml = os.environ.get('TUXCHANGE_EMU_NAND') or os.path.join(
         _share, 'azaharplus-emu', 'nand', 'data', '0' * 32,
         'sysdata', '00010026', '00000000', 'CEC', 'MBoxList____')
     if os.path.exists(ml):

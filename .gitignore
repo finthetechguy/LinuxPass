@@ -1,6 +1,6 @@
 # Console-derived material. Never commit any of this.
 aes_keys.txt
-linuxpass.keys
+tuxchange.keys
 *.key
 *.keys
 tests/corpus/

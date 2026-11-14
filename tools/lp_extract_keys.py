@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Write linuxpass.keys by reading constants out of your own console dumps."""
+"""Write tuxchange.keys by reading constants out of your own console dumps."""
 import argparse
 import os
 import string
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(os.path.dirname(HERE), 'linuxpass'))
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), 'tuxchange'))
 
 import lp_keys as keys                                              # noqa: E402
 
@@ -86,7 +86,7 @@ def extract_cec_store(path):
 
 
 def render(values):
-    lines = ['# linuxpass.keys: constants read out of your own console dumps.',
+    lines = ['# tuxchange.keys: constants read out of your own console dumps.',
              '# Written by tools/lp_extract_keys.py. Treat this file as private:',
              '# it is console-derived material and must never be committed or shared.',
              '']
@@ -101,8 +101,8 @@ def render(values):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(
-        description='Write linuxpass.keys from your own console dumps.',
-        epilog='Run with no source and it just reports what LinuxPass can currently find.')
+        description='Write tuxchange.keys from your own console dumps.',
+        epilog='Run with no source and it just reports what Tuxchange can currently find.')
     ap.add_argument('--cecd', metavar='CODE_BIN',
                     help='decrypted cecd code.bin, which supplies the CCMP HMAC key strings')
     ap.add_argument('--cecd-offset', type=lambda s: int(s, 0), metavar='OFF',
@@ -110,7 +110,7 @@ def main(argv=None):
     ap.add_argument('--cec-store', metavar='PATH',
                     help='a CEC SAVE image or extracted store, which supplies title HMAC keys')
     ap.add_argument('-o', '--output', metavar='PATH',
-                    help='where to write (default: ~/.config/linuxpass/linuxpass.keys)')
+                    help='where to write (default: ~/.config/tuxchange/tuxchange.keys)')
     ap.add_argument('--stdout', action='store_true', help='print instead of writing a file')
     ap.add_argument('--force', action='store_true', help='overwrite an existing file')
     a = ap.parse_args(argv)
@@ -141,7 +141,7 @@ def main(argv=None):
 
     out = a.output or os.path.join(
         os.environ.get('XDG_CONFIG_HOME') or os.path.join(os.path.expanduser('~'), '.config'),
-        'linuxpass', keys.CONSTANTS_FILE)
+        'tuxchange', keys.CONSTANTS_FILE)
     if os.path.exists(out) and not a.force and not existing:
         raise SystemExit('error: %s exists; pass --force to overwrite' % out)
     os.makedirs(os.path.dirname(out), exist_ok=True)

@@ -4,15 +4,15 @@ import os
 import re
 import sys
 
-CONFIG_DIR_NAME = 'linuxpass'
+CONFIG_DIR_NAME = 'tuxchange'
 AES_KEYS_FILE = 'aes_keys.txt'
-CONSTANTS_FILE = 'linuxpass.keys'
-SYSTEM_DIR = '/etc/linuxpass'
+CONSTANTS_FILE = 'tuxchange.keys'
+SYSTEM_DIR = '/etc/tuxchange'
 
 # Public constant from 3dbrew, identical on every console.
 SCRAMBLER_C = 0x1FF9E9AAC5FE0408024591DC5D52768A
 
-_WIKI = 'https://github.com/finthetechguy/LinuxPass/wiki/Getting-your-keys'
+_WIKI = 'https://github.com/finthetechguy/Tuxchange/wiki/Getting-your-keys'
 
 
 class MissingKey(Exception):
@@ -29,10 +29,10 @@ def search_paths(filename, explicit=None):
     out = []
     if explicit:
         out.append(explicit if os.path.isdir(explicit) is False else os.path.join(explicit, filename))
-    env = os.environ.get('LINUXPASS_KEYS' if filename == AES_KEYS_FILE else 'LINUXPASS_KEYFILE')
+    env = os.environ.get('TUXCHANGE_KEYS' if filename == AES_KEYS_FILE else 'TUXCHANGE_KEYFILE')
     if env:
         out.append(env if not os.path.isdir(env) else os.path.join(env, filename))
-    envdir = os.environ.get('LINUXPASS_KEYDIR')
+    envdir = os.environ.get('TUXCHANGE_KEYDIR')
     if envdir:
         out.append(os.path.join(envdir, filename))
     out.append(os.path.join(_config_dir(), filename))
@@ -57,7 +57,7 @@ def locate(filename, explicit=None):
 def _missing(what, filename, how, explicit=None):
     where = '\n'.join('      %s' % p for p in search_paths(filename, explicit))
     return MissingKey(
-        "LinuxPass needs %s, which comes from your own console and is not shipped.\n"
+        "Tuxchange needs %s, which comes from your own console and is not shipped.\n"
         "\n"
         "  Expected it in %s. Looked in:\n%s\n"
         "\n"
@@ -154,7 +154,7 @@ _CONST_RE = re.compile(r'^\s*([A-Za-z][A-Za-z0-9_.]*)\s*=\s*(.+?)\s*$')
 
 
 def constants(explicit=None, required=False):
-    """Parse linuxpass.keys into {name: bytes}."""
+    """Parse tuxchange.keys into {name: bytes}."""
     path = locate(CONSTANTS_FILE, explicit)
     if path is None:
         if not required:
@@ -242,13 +242,13 @@ def install_test_keys(directory, seed=0x1105):
 
     with open(os.path.join(directory, CONSTANTS_FILE), 'w') as fh:
         fh.write('# THROWAWAY self-test constants: generated, not real.\n'
-                 'cecd_hmac_retail = "LinuxPassSelfTes"\n'
-                 'cecd_hmac_dev    = "LinuxPassSelfDev"\n'
+                 'cecd_hmac_retail = "TuxchangeSelfTes"\n'
+                 'cecd_hmac_dev    = "TuxchangeSelfDev"\n'
                  'title_hmac_%08X = %s\n'
                  'title_hmac_%08X = %s\n'
                  % (PLAZA_TITLE_ID, hx(32), 0x00030600, hx(32)))
 
-    os.environ['LINUXPASS_KEYDIR'] = directory
+    os.environ['TUXCHANGE_KEYDIR'] = directory
     _AES_CACHE.clear()
     _CONST_CACHE.clear()
     return directory
@@ -259,12 +259,12 @@ def selftest_keys():
     if have_aes_keys() and have_constants():
         return False
     import tempfile
-    install_test_keys(os.path.join(tempfile.mkdtemp(prefix='linuxpass-selftest-'), 'keys'))
+    install_test_keys(os.path.join(tempfile.mkdtemp(prefix='tuxchange-selftest-'), 'keys'))
     return True
 
 
 def status(explicit=None):
-    """(ok, lines) describing what is present. Used by `linuxpass keys` and the GUI."""
+    """(ok, lines) describing what is present. Used by `tuxchange keys` and the GUI."""
     lines = []
     ok = True
     ap = locate(AES_KEYS_FILE, explicit)

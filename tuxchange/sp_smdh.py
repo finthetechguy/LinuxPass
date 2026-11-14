@@ -190,13 +190,13 @@ def _selftest():
             chk('%dx%d icon is a coherent image, not noise' % (dim, dim),
                 real < d2 / 2, 'delta %.1f vs shuffled %.1f' % (real, d2 / (dim * (dim - 1))))
 
-    ra = build_region_a(0x0004000012345600, 'LinuxPass', 'StreetPass from Linux', 'LinuxPass')
+    ra = build_region_a(0x0004000012345600, 'Tuxchange', 'StreetPass from Linux', 'Tuxchange')
     rb = build_region_b(fill=0x7BEF)
     nb = write_regions(body, ra, rb)
     got = parse_region_a(nb)
     chk('synthesised region A round-trips', got['title_id'] == 0x0004000012345600
-        and got['titles'][0]['short'] == 'LinuxPass'
-        and got['titles'][15]['publisher'] == 'LinuxPass' and got['category_ok'])
+        and got['titles'][0]['short'] == 'Tuxchange'
+        and got['titles'][15]['publisher'] == 'Tuxchange' and got['category_ok'])
     chk('synthesised region A passes the receive gate', validate_region_a(nb)[0])
     chk('synthesised region B decodes to the fill colour',
         all(v == 0x7BEF for row in decode_icon(nb) for v in row))

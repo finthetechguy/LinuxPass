@@ -1,6 +1,6 @@
 #!/bin/bash
 # Run sp_link.py once by hand, with a capture and a log, for debugging.
-#   sudo ./scripts/linuxpass-link <iface> [channel] [sp_link.py arguments]
+#   sudo ./scripts/tuxchange-link <iface> [channel] [sp_link.py arguments]
 # WARNING: arms a forced SysRq reboot before touching the radio, cancelled on a clean exit.
 set -u
 
@@ -118,7 +118,7 @@ echo
 
 TS=$(date +%s)
 # --mac must match the interface MAC or the hardware will not ACK what we claim to be.
-"$PY" "$ROOT/linuxpass/sp_link.py" --iface "$MON" --channel "$CH" --mac "$OURMAC" \
+"$PY" "$ROOT/tuxchange/sp_link.py" --iface "$MON" --channel "$CH" --mac "$OURMAC" \
      --pcap "$ROOT/stage2_${TS}.pcap" --log "$ROOT/stage2_${TS}.log" "$@"
 RC=$?
 echo

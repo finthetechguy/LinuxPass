@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""LinuxPass: a daemon that exchanges with any 3DS that passes."""
+"""Tuxchange: a daemon that exchanges with any 3DS that passes."""
 import contextlib, os, sys, json, time, socket, stat, struct, threading, random, argparse, re, pwd
 import base64
 
@@ -86,7 +86,7 @@ def write_env_key(path, key, value):
     """Set one KEY, keeping the others. Renamed into place so systemd never reads half a file. -> None or error."""
     d = read_env_file(path)
     d[key] = value
-    body = ['# Written by the LinuxPass daemon. Change these from the GUI or `sp_relay.py ctl`.']
+    body = ['# Written by the Tuxchange daemon. Change these from the GUI or `sp_relay.py ctl`.']
     body += ['%s=%s' % (k, d[k]) for k in sorted(d)]
     try:
         tmp = path + '.tmp'
@@ -1031,7 +1031,7 @@ class Relay:
                  % (self.a.iface, self.iface_mac(), want))
         self.log('           The card will NOT ACK the console, so no exchange can complete and')
         self.log('           this relay will look healthy while being ignored.')
-        self.log('           Fix: put SP_MAC=%s in /etc/default/linuxpass (or drop --mac), '
+        self.log('           Fix: put SP_MAC=%s in /etc/default/tuxchange (or drop --mac), '
                  'then restart.' % want)
         return False
 
@@ -1100,7 +1100,7 @@ class Relay:
         """-> the daemon's own recent output, newest last."""
         import subprocess
         try:
-            r = subprocess.run(['journalctl', '-u', 'linuxpass', '-n', str(limit),
+            r = subprocess.run(['journalctl', '-u', 'tuxchange', '-n', str(limit),
                                 '--no-pager', '-o', 'cat'],
                                capture_output=True, timeout=10)
             if r.returncode == 0 and r.stdout.strip():
@@ -1957,7 +1957,7 @@ def _selftest():
                 stat.S_IMODE(os.stat(sockp).st_mode) == 0o600,
                 oct(stat.S_IMODE(os.stat(sockp).st_mode)))
             me, other = os.getuid(), os.getuid() + 1
-            pdir = tempfile.mkdtemp(prefix='linuxpass-perm-', dir='/tmp')
+            pdir = tempfile.mkdtemp(prefix='tuxchange-perm-', dir='/tmp')
             os.chmod(pdir, 0o755)
             secret = os.path.join(pdir, 'secret')
             open(secret, 'w').close()
@@ -2307,7 +2307,7 @@ def _selftest():
 
 
 def main():
-    ap = argparse.ArgumentParser(description='LinuxPass: StreetPass a Nintendo 3DS from Linux.')
+    ap = argparse.ArgumentParser(description='Tuxchange: StreetPass a Nintendo 3DS from Linux.')
     sub = ap.add_subparsers(dest='cmd')
 
     run = sub.add_parser('run', help='the daemon')
@@ -2398,7 +2398,7 @@ def main():
     exp.add_argument('--no-backup', action='store_true',
                      help='skip archiving the CEC folder before changing it')
     exp.add_argument('--backup-dir', help='where that archive goes '
-                                          '(default ~/.local/share/linuxpass/cec-backups)')
+                                          '(default ~/.local/share/tuxchange/cec-backups)')
     exp.add_argument('--force', action='store_true', help='even while an emulator is running')
 
     st = sub.add_parser('status', help='print the store, or the running daemon if there is one')

@@ -170,8 +170,8 @@ def check_birthday(month, day):
 
 
 def build_body(mii_cfl, greeting='Sent from Linux', title_id=0x0004000000000000,
-               title_short='LinuxPass', title_long='StreetPass from Linux',
-               title_publisher='LinuxPass', icon_small=None, icon_large=None,
+               title_short='Tuxchange', title_long='StreetPass from Linux',
+               title_publisher='Tuxchange', icon_small=None, icon_large=None,
                country='United Kingdom', region='England', address_code=0, profile=None,
                bubble=0):
     body = bytearray(BODY_LEN)
@@ -480,7 +480,7 @@ def _selftest():
     import lp_corpus as corpus, lp_keys as _k
     if _k.selftest_keys():
         print('  (no console keys found, so running on generated throwaway keys)')
-    msg = build(mii_name='Linux', author_name='LinuxPass', greeting='Built from zero',
+    msg = build(mii_name='Linux', author_name='Tuxchange', greeting='Built from zero',
                 creator_mac='b8:ae:6e:11:22:33', message_id=0x0123456789ABCDEF)
 
     chk('message is the same size as a real one', len(msg) == 32732, len(msg))
@@ -523,7 +523,7 @@ def _selftest():
     chk('Mii CCM MAC and CRC both valid',
         pl['mii']['ccm_mac_ok'] and pl['mii']['crc_ok'])
     chk('Mii name and author round-trip',
-        pl['mii']['mii_name'] == 'Linux' and pl['mii']['author_name'] == 'LinuxPass')
+        pl['mii']['mii_name'] == 'Linux' and pl['mii']['author_name'] == 'Tuxchange')
     chk('present_flag is 0x100 as the shipping build writes',
         struct.unpack_from('<I', body, OFF_PRESENT)[0] == 0x100)
 
@@ -539,8 +539,8 @@ def _selftest():
     chk('region A passes sp_smdh.validate_region_a', okr, str(whyr))
     ta = sp_smdh.parse_region_a(body)
     chk('region A category check passes', ta['category_ok'])
-    chk('region A titles round-trip', ta['titles'][0]['short'] == 'LinuxPass'
-        and ta['titles'][15]['publisher'] == 'LinuxPass')
+    chk('region A titles round-trip', ta['titles'][0]['short'] == 'Tuxchange'
+        and ta['titles'][15]['publisher'] == 'Tuxchange')
 
     for bad in ('a%b', 'a\\b'):
         try:
@@ -643,7 +643,7 @@ def _selftest():
     chk('favourite colour (shirt) round-trips', ap2['favourite_colour'] == 6)
     chk('author name is the card Creator field',
         sp_mii.parse_cfl(sp_mii.read_plaza_mii(build_body(
-            build_cfl(mii_name='Tux', author_name='LinuxPass')))[0])['author_name'] == 'LinuxPass')
+            build_cfl(mii_name='Tux', author_name='Tuxchange')))[0])['author_name'] == 'Tuxchange')
     for k, v in (('streetpass_hits', 1000000), ('plaza_population', 3001), ('hat', 76),
                  ('pet', 3), ('dream', 20), ('hobby', 28)):
         chk('profile %s=%d rejected' % (k, v), _raises(lambda: build_profile(**{k: v})))

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Set up a monitor interface, run sp_probe_tx.py, and put the machine back.
-#   sudo ./scripts/linuxpass-probe [iface] [channels] [sp_probe_tx.py arguments]
+#   sudo ./scripts/tuxchange-probe [iface] [channels] [sp_probe_tx.py arguments]
 set -u
 
 IFACE=${1:-wlan0}
@@ -110,6 +110,6 @@ echo "regulatory domain: $(iw reg get 2>/dev/null | sed -n 's/^country /  countr
 echo "  (channels 1/6/11 are legal everywhere, so Stage 1 needs no regulatory change)"
 echo
 
-"$PY" "$ROOT/linuxpass/sp_probe_tx.py" --iface "$MON" --channels "$CHANS" "$@"
+"$PY" "$ROOT/tuxchange/sp_probe_tx.py" --iface "$MON" --channels "$CHANS" "$@"
 RC=$?
 exit $RC

@@ -1,6 +1,6 @@
 #!/bin/bash
-# Run LinuxPass in the foreground: monitor up, daemon, machine put back on exit.
-#   sudo ./scripts/linuxpass [iface] [channels] [sp_relay.py run arguments]
+# Run Tuxchange in the foreground: monitor up, daemon, machine put back on exit.
+#   sudo ./scripts/tuxchange [iface] [channels] [sp_relay.py run arguments]
 set -u
 
 IFACE=${1:-}          # empty: sp_monitor.sh picks an ath9k adapter
@@ -23,7 +23,7 @@ case "$STORE" in /*) ;; *) STORE="$ROOT/$STORE" ;; esac
 
 if [ "$(id -u)" -ne 0 ]; then echo "needs root; re-run with sudo."; exit 1; fi
 
-OURMAC=$("$PY" "$ROOT/linuxpass/sp_relay.py" identity --store "$STORE" 2>/dev/null)
+OURMAC=$("$PY" "$ROOT/tuxchange/sp_relay.py" identity --store "$STORE" 2>/dev/null)
 echo "interface $IFACE -> $MON, channels $CH"
 echo "store      $STORE"
 echo "identity   $OURMAC (fixed; --rotate-identity changes it per exchange)"
@@ -38,7 +38,7 @@ trap cleanup EXIT INT TERM
 SP_IFACE=$IFACE SP_MON=$MON SP_STORE=$STORE "$HERE/sp_monitor.sh" up || exit 1
 echo
 echo "control socket: $STORE/relay.sock"
-echo "  $PY $ROOT/linuxpass/sp_relay.py ctl status  --store $STORE"
-echo "  $PY $ROOT/linuxpass/sp_relay.py ctl pause   --store $STORE"
+echo "  $PY $ROOT/tuxchange/sp_relay.py ctl status  --store $STORE"
+echo "  $PY $ROOT/tuxchange/sp_relay.py ctl pause   --store $STORE"
 echo
-"$PY" "$ROOT/linuxpass/sp_relay.py" run --store "$STORE" --iface "$MON" --channel "$CH" "$@"
+"$PY" "$ROOT/tuxchange/sp_relay.py" run --store "$STORE" --iface "$MON" --channel "$CH" "$@"

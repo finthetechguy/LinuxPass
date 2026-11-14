@@ -1,4 +1,4 @@
-"""LinuxPass: StreetPass a Nintendo 3DS from Linux."""
+"""Tuxchange: StreetPass a Nintendo 3DS from Linux."""
 import os
 import sys
 

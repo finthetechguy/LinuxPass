@@ -1,16 +1,16 @@
 #!/bin/bash
-# Install or remove linuxpass.service. Re-run after updating the checkout.
+# Install or remove tuxchange.service. Re-run after updating the checkout.
 # The code is copied because a root service must not run files a desktop user can edit.
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/.." && pwd)
-UNIT=/etc/systemd/system/linuxpass.service
-DEFAULTS=/etc/default/linuxpass
-POLKIT=/etc/polkit-1/rules.d/50-linuxpass.rules
-DESKTOP=/usr/share/applications/linuxpass-gui.desktop
-KEYDIR=/etc/linuxpass
-LIB=/opt/linuxpass
-STATE=/var/lib/linuxpass
+UNIT=/etc/systemd/system/tuxchange.service
+DEFAULTS=/etc/default/tuxchange
+POLKIT=/etc/polkit-1/rules.d/50-tuxchange.rules
+DESKTOP=/usr/share/applications/tuxchange-gui.desktop
+KEYDIR=/etc/tuxchange
+LIB=/opt/tuxchange
+STATE=/var/lib/tuxchange
 GUI_USER=${SUDO_USER:-${GUI_USER:-}}
 PY=$(command -v python3)
 
@@ -33,8 +33,8 @@ root_only() {
 # Copies regular files only, so a symlink in the checkout cannot lead root back to user files.
 install_code() {
   local d f mode
-  rm -rf "${LIB:?}/linuxpass" "${LIB:?}/gui" "${LIB:?}/scripts"
-  for d in linuxpass gui scripts; do
+  rm -rf "${LIB:?}/tuxchange" "${LIB:?}/gui" "${LIB:?}/scripts"
+  for d in tuxchange gui scripts; do
     while IFS= read -r -d '' f; do
       mode=0644
       [ -x "$ROOT/$f" ] && mode=0755
@@ -46,7 +46,7 @@ install_code() {
 case "${1:-}" in
 install)
   need_root
-  [ -f "$HERE/linuxpass.service.in" ] || { echo "missing linuxpass.service.in"; exit 1; }
+  [ -f "$HERE/tuxchange.service.in" ] || { echo "missing tuxchange.service.in"; exit 1; }
   if [ -z "$PY" ] || ! root_only "$PY"; then
     echo "python3 (${PY:-not found}) can be changed by a non-root user, and the service runs as root."
     echo "Install python3 from your distribution and re-run."
@@ -55,11 +55,11 @@ install)
   install_code
   install -d -o root -g root -m 0755 "$STATE"
   sed -e "s|__ROOT__|$LIB|g" -e "s|__PY__|$PY|g" -e "s|__GUI_USER__|$GUI_USER|g" \
-      "$HERE/linuxpass.service.in" > "$UNIT"
+      "$HERE/tuxchange.service.in" > "$UNIT"
   chmod 0644 "$UNIT"
   if [ ! -e "$DEFAULTS" ]; then
     cat > "$DEFAULTS" <<EOF
-# Tunables for linuxpass.service. Edit here, then: systemctl restart linuxpass
+# Tunables for tuxchange.service. Edit here, then: systemctl restart tuxchange
 # Empty picks the first ath9k adapter. Any other driver must be named here.
 SP_IFACE=
 SP_MON=mon0
@@ -86,28 +86,28 @@ EOF
   fi
 
   # Lets the GUI start, stop and restart this one unit without a stored password.
-  if [ -n "$GUI_USER" ] && [ -d /etc/polkit-1/rules.d ] && [ -f "$HERE/50-linuxpass.rules.in" ]; then
-    sed -e "s|__GUI_USER__|$GUI_USER|g" "$HERE/50-linuxpass.rules.in" > "$POLKIT"
+  if [ -n "$GUI_USER" ] && [ -d /etc/polkit-1/rules.d ] && [ -f "$HERE/50-tuxchange.rules.in" ]; then
+    sed -e "s|__GUI_USER__|$GUI_USER|g" "$HERE/50-tuxchange.rules.in" > "$POLKIT"
     chmod 0644 "$POLKIT"
-    echo "wrote $POLKIT  (lets $GUI_USER manage only linuxpass.service)"
+    echo "wrote $POLKIT  (lets $GUI_USER manage only tuxchange.service)"
   else
     echo "NOTE: no polkit rule written; the GUI will need a polkit agent to start/stop the service"
   fi
 
-  if [ -f "$HERE/linuxpass-gui.desktop.in" ] && [ -d /usr/share/applications ]; then
+  if [ -f "$HERE/tuxchange-gui.desktop.in" ] && [ -d /usr/share/applications ]; then
     sed -e "s|__ROOT__|$LIB|g" -e "s|__PY__|$PY|g" -e "s|__STORE__|$STORE_PATH|g" \
-        "$HERE/linuxpass-gui.desktop.in" > "$DESKTOP"
+        "$HERE/tuxchange-gui.desktop.in" > "$DESKTOP"
     chmod 0644 "$DESKTOP"
     command -v update-desktop-database >/dev/null && update-desktop-database -q 2>/dev/null
     echo "wrote $DESKTOP  (menu entry for the GUI)"
   fi
 
-  # The service runs as root, so it reads keys from /etc/linuxpass.
+  # The service runs as root, so it reads keys from /etc/tuxchange.
   mkdir -p "$KEYDIR"
   chmod 0700 "$KEYDIR"
   if [ -n "$GUI_USER" ]; then
-    USER_CFG=$(getent passwd "$GUI_USER" | cut -d: -f6)/.config/linuxpass
-    for k in aes_keys.txt linuxpass.keys; do
+    USER_CFG=$(getent passwd "$GUI_USER" | cut -d: -f6)/.config/tuxchange
+    for k in aes_keys.txt tuxchange.keys; do
       if [ -f "$USER_CFG/$k" ] && [ ! -f "$KEYDIR/$k" ]; then
         install -m 0600 -o root -g root "$USER_CFG/$k" "$KEYDIR/$k"
         echo "copied $k into $KEYDIR (the service runs as root and cannot read \$HOME)"
@@ -121,18 +121,18 @@ EOF
 
   systemctl daemon-reload
   systemd-analyze verify "$UNIT" 2>&1 | grep -v '^$' && echo "(verify emitted the above)"
-  systemctl enable linuxpass.service
+  systemctl enable tuxchange.service
   echo
   echo "installed to $LIB. Re-run this after updating the checkout. Nothing is running yet:"
-  echo "  sudo systemctl start linuxpass      # or: sudo $0 start"
-  echo "  systemctl status linuxpass"
-  echo "  journalctl -u linuxpass -f"
+  echo "  sudo systemctl start tuxchange      # or: sudo $0 start"
+  echo "  systemctl status tuxchange"
+  echo "  journalctl -u tuxchange -f"
   echo
   echo "This unit can restart itself; it cannot reboot the machine."
   ;;
 uninstall)
   need_root
-  systemctl disable --now linuxpass.service 2>/dev/null
+  systemctl disable --now tuxchange.service 2>/dev/null
   rm -f "$UNIT" "$POLKIT" "$DESKTOP"
   rm -rf "${LIB:?}"
   systemctl daemon-reload
@@ -142,10 +142,10 @@ uninstall)
   ;;
 start|stop|restart|status)
   need_root
-  systemctl "$1" linuxpass.service
+  systemctl "$1" tuxchange.service
   ;;
 logs)
-  journalctl -u linuxpass -n "${2:-60}" --no-pager
+  journalctl -u tuxchange -n "${2:-60}" --no-pager
   ;;
 *)
   echo "usage: install.sh {install|uninstall|start|stop|restart|status|logs [n]}"

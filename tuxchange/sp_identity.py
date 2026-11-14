@@ -32,10 +32,10 @@ def derive(store_path):
     }
 
 
-def build_message(store_path, mii_name='Relay', author_name='LinuxPass',
+def build_message(store_path, mii_name='Relay', author_name='Tuxchange',
                   greeting='Hello from Linux', hits=0, population=0, pet=0,
-                  title_short='LinuxPass', title_long='StreetPass from Linux',
-                  title_publisher='LinuxPass', when=None, **extra):
+                  title_short='Tuxchange', title_long='StreetPass from Linux',
+                  title_publisher='Tuxchange', when=None, **extra):
     """-> a complete Mii Plaza wire message that is this relay's own."""
     if len(mii_name) > MII_NAME_MAX:
         raise ValueError('a Mii name is at most %d characters, got %d (%r)'
@@ -76,7 +76,7 @@ def seed(store, store_path=None, replace=False, log=print, **kw):
     ident = derive(store_path)
     log('  filed this relay\'s own Mii Plaza message (%d B)' % len(container))
     log('    Mii %r by %r, id %08x, creator MAC %s'
-        % (kw.get('mii_name', 'Relay'), kw.get('author_name', 'LinuxPass'),
+        % (kw.get('mii_name', 'Relay'), kw.get('author_name', 'Tuxchange'),
            ident['mii_id'], ident['creator_mac']))
     return p
 
@@ -148,7 +148,7 @@ def _selftest():
             cfl[0x10:0x16] == cm,
             cfl[0x10:0x16].hex())
         chk('the Mii carries the name and author we asked for',
-            fields.get('mii_name') == 'Relay' and fields.get('author_name') == 'LinuxPass',
+            fields.get('mii_name') == 'Relay' and fields.get('author_name') == 'Tuxchange',
             (fields.get('mii_name'), fields.get('author_name')))
         chk('and the derived Mii id', struct.unpack_from('<I', cfl, 0x0C)[0] == a['mii_id'],
             '%08x' % struct.unpack_from('<I', cfl, 0x0C)[0])
@@ -223,7 +223,7 @@ def main():
         p.add_argument('--store', default='relay_store')
         if name != 'show':
             p.add_argument('--mii-name', default='Relay')
-            p.add_argument('--author-name', default='LinuxPass')
+            p.add_argument('--author-name', default='Tuxchange')
             p.add_argument('--greeting', default='Hello from Linux')
             p.add_argument('--hits', type=int, default=0)
             p.add_argument('--population', type=int, default=0)

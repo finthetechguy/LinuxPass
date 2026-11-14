@@ -136,7 +136,7 @@ class Link:
             if getattr(a, 'birthday', None):
                 bm, bd_ = (int(x) for x in a.birthday.split('/'))
             mii = sp_build.build_cfl(mii_name=a.mii_name or 'Linux',
-                                     author_name=a.author_name or 'LinuxPass',
+                                     author_name=a.author_name or 'Tuxchange',
                                      creator_mac=bytes([0xb8, 0xae, 0x6e]) +
                                      bytes(random.getrandbits(8) for _ in range(3)),
                                      birthday_month=bm, birthday_day=bd_,
@@ -150,9 +150,9 @@ class Link:
             tid = int(a.title_id, 0) if getattr(a, 'title_id', None) else 0x0004000012345600
             body = sp_build.build_body(mii, greeting=a.greeting or 'Built from zero',
                                        title_id=tid,
-                                       title_short=getattr(a, 'title_name', None) or 'LinuxPass',
+                                       title_short=getattr(a, 'title_name', None) or 'Tuxchange',
                                        title_long='StreetPass from Linux',
-                                       title_publisher='LinuxPass', profile=profile,
+                                       title_publisher='Tuxchange', profile=profile,
                                        bubble=int(getattr(a, 'bubble', 0) or 0))
             self.outbox = sp_build.build_outbox(sp_build.build_message(body))
             info = sp_mii.parse_cfl(mii)
@@ -162,13 +162,13 @@ class Link:
                      % (info['mii_name'], info['author_name'], info['mii_id'],
                         info['creator_mac'], a.greeting or 'Built from zero'))
             okv, why = sp_mii.validate_cfl(mii)
-            self.log('    title id %016X  %r' % (tid, getattr(a, 'title_name', None) or 'LinuxPass'))
+            self.log('    title id %016X  %r' % (tid, getattr(a, 'title_name', None) or 'Tuxchange'))
             self.log('    card: hits=%d pop=%d hat=%d pet=%d dream=%d hobby=%d '
                      'birthday=%d/%d colour=%d creator=%r'
                      % (struct.unpack_from('<I', profile, 0)[0],
                         struct.unpack_from('<H', profile, 4)[0], profile[6], profile[7],
                         profile[8], profile[9], bm, bd_,
-                        int(getattr(a, 'colour', 0) or 0), a.author_name or 'LinuxPass'))
+                        int(getattr(a, 'colour', 0) or 0), a.author_name or 'Tuxchange'))
             self.log('    gates: validate_cfl=%s  region_a=%s'
                      % (okv, sp_smdh.validate_region_a(body)[0]))
             if not okv:
@@ -244,7 +244,7 @@ class Link:
             s.bind((self.a.iface, 0))
             s.setblocking(False)
         except PermissionError:
-            self.log('FATAL: need root. Use ./linuxpass-link')
+            self.log('FATAL: need root. Use ./tuxchange-link')
             return False
         except OSError as e:
             self.log('FATAL: cannot open %s: %s' % (self.a.iface, e))
@@ -954,7 +954,7 @@ def build_obj_11(token8, services):
 
 
 def plaza_hmac_key():
-    """Mii Plaza's message HMAC key, from your console's CEC store via linuxpass.keys."""
+    """Mii Plaza's message HMAC key, from your console's CEC store via tuxchange.keys."""
     import lp_keys
     return lp_keys.plaza_hmac_key()
 
@@ -1235,7 +1235,7 @@ def simulate(verbose=1, peer_hook=None, out=None, link_at=0.60):
     US = V.get('our_mac') or 'ba:ae:6e:44:55:66'
     US_TOK = V.get('our_token') or '8899aabbccddeeff'
     # Seventeen bytes: cecd's key length is 0x11 and the trailing NUL counts.
-    SIM_KEY17 = b'LinuxPassSelfTest'
+    SIM_KEY17 = b'TuxchangeSelfTest'
     SIM_NORMALKEY = bytes(range(16))
     use_real_keys = bool(V.get('synack'))
 
@@ -1480,7 +1480,7 @@ def selftest():
 
     th = bytes.fromhex('0011223344556677'); tc = bytes.fromhex('8899aabbccddeeff')
     mh = T.macbytes('96:58:cb:11:22:33'); mc = T.macbytes('ba:ae:6e:44:55:66')
-    kw = {'key17': b'LinuxPassSelfTest', 'keyslot_2e_normalkey': bytes(range(16))}
+    kw = {'key17': b'TuxchangeSelfTest', 'keyslot_2e_normalkey': bytes(range(16))}
     chk('client-first ordering gives a DIFFERENT key (so the order matters)',
         derive_ccmp_key(tc, th, mc, mh, **kw) != derive_ccmp_key(th, tc, mh, mc, **kw))
     if V.get('synack'):

@@ -3,7 +3,7 @@ requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "linuxpass"
+name = "tuxchange"
 version = "0.1.0"
 description = "StreetPass a Nintendo 3DS from a Linux device, with your own data"
 readme = "README.md"
@@ -29,14 +29,14 @@ pcap = ["scapy>=2.5"]
 gui  = ["PyGObject>=3.42"]
 
 [project.scripts]
-linuxpass = "linuxpass._entry:relay"
-linuxpass-gui = "linuxpass._entry:gui"
+tuxchange = "tuxchange._entry:relay"
+tuxchange-gui = "tuxchange._entry:gui"
 
 [tool.setuptools]
-packages = ["linuxpass", "linuxpass.gui"]
+packages = ["tuxchange", "tuxchange.gui"]
 
 [tool.setuptools.package-dir]
-"linuxpass.gui" = "gui"
+"tuxchange.gui" = "gui"
 
 [tool.ruff]
 line-length = 100

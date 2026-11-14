@@ -11,9 +11,9 @@ ROOT=$(cd "$HERE/.." && pwd)
 STORE=${SP_STORE:-$ROOT/relay_store}
 PY="$ROOT/.venv/bin/python"
 [ -x "$PY" ] || PY=$(command -v python3)
-NM_FLAG=/run/linuxpass.nm-stopped
-RUN_IFACE=/run/linuxpass.iface     # what `up` really took, so `down` restores THAT adapter
-WAS_UP=/run/linuxpass.iface-was-up  # written once, so a repeated `up` cannot lose the original state
+NM_FLAG=/run/tuxchange.nm-stopped
+RUN_IFACE=/run/tuxchange.iface     # what `up` really took, so `down` restores THAT adapter
+WAS_UP=/run/tuxchange.iface-was-up  # written once, so a repeated `up` cannot lose the original state
 
 if [ "$(id -u)" -ne 0 ]; then echo "sp_monitor.sh needs root"; exit 1; fi
 for t in iw ip timeout; do command -v $t >/dev/null || { echo "install $t"; exit 1; }; done
@@ -71,7 +71,7 @@ up)
     IFACE=$ALT
   fi
   printf '%s\n' "$IFACE" >"$RUN_IFACE" 2>/dev/null || true
-  MAC=${SP_MAC:-$("$PY" "$ROOT/linuxpass/sp_relay.py" identity --store "$STORE" 2>/dev/null)}
+  MAC=${SP_MAC:-$("$PY" "$ROOT/tuxchange/sp_relay.py" identity --store "$STORE" 2>/dev/null)}
   case "$MAC" in
     ??:??:??:??:??:??) ;;
     *) echo "could not derive a MAC for store $STORE"; exit 1 ;;

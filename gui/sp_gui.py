@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A GTK4 / libadwaita front end for LinuxPass."""
+"""A GTK4 / libadwaita front end for Tuxchange."""
 import os, sys, json, time, base64, threading, subprocess, argparse
 
 import gi
@@ -8,17 +8,17 @@ gi.require_version('Adw', '1')
 from gi.repository import Gtk, Adw, GLib, Gio, Gdk        # noqa: E402
 
 sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'linuxpass'))
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'tuxchange'))
 import sp_relay                                            # noqa: E402
 
 def default_store():
-    """Where the store lives when nobody says otherwise: $XDG_DATA_HOME/linuxpass/store."""
+    """Where the store lives when nobody says otherwise: $XDG_DATA_HOME/tuxchange/store."""
     base = os.environ.get('XDG_DATA_HOME') or os.path.join(os.path.expanduser('~'), '.local', 'share')
-    return os.path.join(base, 'linuxpass', 'store')
+    return os.path.join(base, 'tuxchange', 'store')
 
 
-APP_ID = 'org.linuxpass.LinuxPass'
-UNIT = 'linuxpass.service'
+APP_ID = 'org.tuxchange.Tuxchange'
+UNIT = 'tuxchange.service'
 REFRESH_S = 2
 
 # The format holds 24 titles. No console we have dumped enables more than 12.
@@ -268,7 +268,7 @@ class HomePage(Page):
         sub = unit.get('SubState', '?')
         g = self.group('Service')
         state = unit.get('ActiveState', '?')
-        r = row('linuxpass.service',
+        r = row('tuxchange.service',
                 state if sub in ('', '?', state) else '%s (%s)' % (state, sub))
         dot = Gtk.Image(icon_name='media-playback-start-symbolic' if active
                         else 'media-playback-stop-symbolic')
@@ -666,7 +666,7 @@ class DenylistPage(Page):
         self.reset()
 
         g = self.group('Blocked consoles',
-                       'LinuxPass refuses to exchange with these consoles until you unblock '
+                       'Tuxchange refuses to exchange with these consoles until you unblock '
                        'them, whatever MAC they use.')
         b = Gtk.Button(label='Block a console…', halign=Gtk.Align.END, valign=Gtk.Align.CENTER,
                        margin_bottom=6)
@@ -682,7 +682,7 @@ class DenylistPage(Page):
             g.add(r)
 
         g = self.group('MAC filter',
-                       'Like a 3DS, LinuxPass refuses a MAC once it has exchanged with it, and '
+                       'Like a 3DS, Tuxchange refuses a MAC once it has exchanged with it, and '
                        'meets that console again when it presents a new MAC. The newest %d are '
                        'kept; removing one lets it exchange again.' % rep['filter_max'])
         if rep['filter']:
@@ -707,7 +707,7 @@ class DenylistPage(Page):
 
         if rep['backing_off']:
             g = self.group('Retrying soon',
-                           'These consoles engaged but nothing moved. LinuxPass leaves them '
+                           'These consoles engaged but nothing moved. Tuxchange leaves them '
                            'alone briefly so a pass can reach a different console.')
             for e in rep['backing_off']:
                 g.add(row(e['mac'], 'retry in %s   ·   %d failed attempt(s)'
@@ -769,7 +769,7 @@ class LogPage(Page):
 
 class RelayWindow(Adw.ApplicationWindow):
     def __init__(self, app, **kw):
-        super().__init__(application=app, title='LinuxPass',
+        super().__init__(application=app, title='Tuxchange',
                          default_width=980, default_height=760, **kw)
         self.app = app
         self.stack = Adw.ViewStack()
@@ -909,7 +909,7 @@ class RelayApp(Adw.Application):
         ident = sp_identity.derive(self.daemon.store)
         rows, fields = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8), {}
         for key, label, default in (('mii_name', 'Mii name (max 10)', 'Relay'),
-                                    ('author_name', 'Author (max 10)', 'LinuxPass'),
+                                    ('author_name', 'Author (max 10)', 'Tuxchange'),
                                     ('greeting', 'Greeting (max 16)', 'Hello from Linux')):
             e = Gtk.Entry(text=default, placeholder_text=label)
             fields[key] = e
@@ -1078,7 +1078,7 @@ class RelayApp(Adw.Application):
 
 
 def main():
-    ap = argparse.ArgumentParser(description='GTK front end for LinuxPass.')
+    ap = argparse.ArgumentParser(description='GTK front end for Tuxchange.')
     ap.add_argument('--store', default=default_store())
     ap.add_argument('--denylist', action='store_true')
     a = ap.parse_args()

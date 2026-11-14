@@ -3,7 +3,7 @@
 import json
 import os
 
-ENV = 'LINUXPASS_CORPUS'
+ENV = 'TUXCHANGE_CORPUS'
 MANIFEST = 'manifest.json'
 VECTORS = 'vectors.json'
 
@@ -13,7 +13,7 @@ _VECTOR_CACHE = {}
 
 def _config_dir():
     base = os.environ.get('XDG_CONFIG_HOME') or os.path.join(os.path.expanduser('~'), '.config')
-    return os.path.join(base, 'linuxpass', 'corpus')
+    return os.path.join(base, 'tuxchange', 'corpus')
 
 
 def dirs():
@@ -23,7 +23,7 @@ def dirs():
     if env:
         out.extend(p for p in env.split(os.pathsep) if p)
     out.append(_config_dir())
-    out.append('/etc/linuxpass/corpus')
+    out.append('/etc/tuxchange/corpus')
     here = os.path.dirname(os.path.abspath(__file__))
     out.append(os.path.join(os.path.dirname(here), 'tests', 'corpus'))
     out.append(os.path.join(os.getcwd(), 'tests', 'corpus'))

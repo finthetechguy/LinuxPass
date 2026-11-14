@@ -1,6 +1,6 @@
 [Unit]
-Description=LinuxPass -- StreetPass a Nintendo 3DS from Linux
-Documentation=https://github.com/finthetechguy/LinuxPass/wiki
+Description=Tuxchange -- StreetPass a Nintendo 3DS from Linux
+Documentation=https://github.com/finthetechguy/Tuxchange/wiki
 After=network.target
 Wants=network.target
 
@@ -16,12 +16,12 @@ Type=notify
 NotifyAccess=main
 WorkingDirectory=__ROOT__
 
-# Everything tunable lives here; edit /etc/default/linuxpass, not this file.
-EnvironmentFile=-/etc/default/linuxpass
-# Empty picks the first ath9k adapter. Set it in /etc/default/linuxpass to pin one.
+# Everything tunable lives here; edit /etc/default/tuxchange, not this file.
+EnvironmentFile=-/etc/default/tuxchange
+# Empty picks the first ath9k adapter. Set it in /etc/default/tuxchange to pin one.
 Environment=SP_IFACE=
 Environment=SP_MON=mon0
-Environment=SP_STORE=/var/lib/linuxpass
+Environment=SP_STORE=/var/lib/tuxchange
 Environment=SP_CHANNELS=1,6,11
 Environment=SP_WINDOW=180
 Environment=SP_IDLE=2
@@ -33,11 +33,11 @@ Environment=SP_EXTRA=
 # The one desktop user allowed to use the control socket; empty means root only.
 Environment=SP_CONTROL_USER=__GUI_USER__
 # Root-owned, and listed last so it wins over the settings above.
-EnvironmentFile=-/var/lib/linuxpass/relay.env
+EnvironmentFile=-/var/lib/tuxchange/relay.env
 
 # Rebuilt on every (re)start, so a restart is also the recovery for a wedged interface.
 ExecStartPre=__ROOT__/scripts/sp_monitor.sh up
-ExecStart=/bin/sh -c 'exec __PY__ __ROOT__/linuxpass/sp_relay.py run --store "$SP_STORE" --iface "$SP_MON" --channel "$SP_CHANNELS" --window "$SP_WINDOW" --idle "$SP_IDLE" --rotate-every "$SP_ROTATE" --run-logs "$SP_LOGS" --control-user "$SP_CONTROL_USER" --settings-file /var/lib/linuxpass/relay.env $SP_EXTRA'
+ExecStart=/bin/sh -c 'exec __PY__ __ROOT__/tuxchange/sp_relay.py run --store "$SP_STORE" --iface "$SP_MON" --channel "$SP_CHANNELS" --window "$SP_WINDOW" --idle "$SP_IDLE" --rotate-every "$SP_ROTATE" --run-logs "$SP_LOGS" --control-user "$SP_CONTROL_USER" --settings-file /var/lib/tuxchange/relay.env $SP_EXTRA'
 ExecStopPost=__ROOT__/scripts/sp_monitor.sh down
 
 # The daemon sends WATCHDOG=1 from inside its sniffing loop, at most every 5 s.
@@ -59,7 +59,7 @@ LockPersonality=yes
 
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=linuxpass
+SyslogIdentifier=tuxchange
 
 [Install]
 WantedBy=multi-user.target

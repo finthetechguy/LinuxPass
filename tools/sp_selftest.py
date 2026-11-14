@@ -4,7 +4,7 @@ import struct, sys
 from itertools import permutations
 import os as _os, sys as _sys
 _sys.path.insert(0, _os.path.join(
-    _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), 'linuxpass'))
+    _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), 'tuxchange'))
 import lp_keys, sp_ccmp, sp_cec
 from streetpass_ccmp_key import derive_ccmp_key
 
@@ -26,7 +26,7 @@ def build_plaza_message(greeting="hello streetpass", country="United Kingdom",
     struct.pack_into('<I', cfl, 0x0C, 0xC0FFEE01)
     cfl[0x10:0x16] = bytes.fromhex('ba ae 6e 00 11 22'.replace(' ', ''))
     n = "Linux".encode('utf-16-le'); cfl[0x1A:0x1A + len(n)] = n
-    a = "LinuxPass".encode('utf-16-le'); cfl[0x48:0x48 + len(a)] = a
+    a = "Tuxchange".encode('utf-16-le'); cfl[0x48:0x48 + len(a)] = a
     cfl = sp_mii.reseal_cfl(bytes(cfl))
     cont = bytearray(0xA0)
     cont[0:4] = sp_mii.MAGIC_CFPB
@@ -96,7 +96,7 @@ def main():
           f"{s2} vs {complete_score}")
 
     print("\n=== 3. CCMP round-trip across fragments ===")
-    TK = {'key17': b'LinuxPassSelfTest', 'keyslot_2e_normalkey': bytes(range(16))}
+    TK = {'key17': b'TuxchangeSelfTest', 'keyslot_2e_normalkey': bytes(range(16))}
     cid_h = bytes.fromhex("1122334455667788"); cid_c = bytes.fromhex("99aabbccddeeff00")
     mac_h = bytes.fromhex("aabbccddeeff");     mac_c = bytes.fromhex("001122334455")
     key = derive_ccmp_key(cid_h, cid_c, mac_h, mac_c, **TK)

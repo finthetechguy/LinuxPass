@@ -215,7 +215,7 @@ class Runner:
             s.bind((self.a.iface, 0))
             s.setblocking(False)
         except PermissionError:
-            self.log('FATAL: need root (AF_PACKET raw socket). Use ./linuxpass-probe')
+            self.log('FATAL: need root (AF_PACKET raw socket). Use ./tuxchange-probe')
             return False
         except OSError as e:
             self.log('FATAL: cannot open %s: %s' % (self.a.iface, e))
