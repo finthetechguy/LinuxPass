@@ -1556,6 +1556,18 @@ def _selftest():
         chk('sp_link arms the same recovery by default',
             (lambda d: d.manifest_repeat == 1 and d.repeat_type == '0xf2')(
                 sp_link.build_parser().parse_args(['--iface', 'mon0'])))
+        chk('an interface with no radio reports no hardware TX counters',
+            sp_link.T.read_tx_counters('no-such-iface') == ({}, None))
+        Lt = sp_link.Link(sp_link.build_parser().parse_args(['--iface', 'no-such-iface']))
+        Lt.log = lambda m, *_a: Lt.log_lines.append(m)
+        Lt.echoes = 7
+        Lt.verdict({}, {}, None)
+        chk('without hardware counters, our echoed frames are the TX proof',
+            any('TX proof' in m and '7 of our frames' in m for m in Lt.log_lines))
+        Lt.log_lines, Lt.echoes = [], 0
+        Lt.verdict({}, {}, None)
+        chk('and with neither, the verdict says TX is unproven',
+            any('no TX proof' in m for m in Lt.log_lines))
 
         chk('an unknown peer is due immediately', book.due('AA:BB:CC:00:00:01'))
         book.record('AA:BB:CC:00:00:01', [b'\x01' * 8], [b'\x02' * 8], now=1000.0)

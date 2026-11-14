@@ -51,10 +51,11 @@ if [ -d /sys/kernel/debug ] && ! mountpoint -q /sys/kernel/debug 2>/dev/null; th
   mount -t debugfs none /sys/kernel/debug 2>/dev/null \
     && echo "mounted debugfs (for ath9k hardware TX counters)"
 fi
-if ls /sys/kernel/debug/ieee80211/*/ath9k/xmit >/dev/null 2>&1; then
+# Only ath9k has them; check the radio in use, not any radio on the machine.
+if [ -e "/sys/kernel/debug/ieee80211/$PHY/ath9k/xmit" ]; then
   echo "ath9k hardware TX counters: available"
 else
-  echo "ath9k hardware TX counters: not available (will use netdev tx_packets instead)"
+  echo "no hardware TX counters on $PHY; our own frames echoed back will be the TX proof"
 fi
 
 # Only an adapter that was up before this script ran gets brought back up.

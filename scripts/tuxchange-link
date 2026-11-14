@@ -106,13 +106,16 @@ timeout 15 ip link set "$IFACE" down 2>/dev/null
 echo "active monitor $MON up, MAC $OURMAC (hardware will ACK frames addressed to it)"
 echo
 
-if ls /sys/kernel/debug/ieee80211/*/ath9k/xmit >/dev/null 2>&1; then
+# Only ath9k has hardware TX counters; check the radio in use, not any radio on the machine.
+PHY=$(cat "/sys/class/net/$IFACE/phy80211/name" 2>/dev/null)
+XMIT=/sys/kernel/debug/ieee80211/$PHY/ath9k/xmit
+if [ -e "$XMIT" ]; then
   echo "ath9k hardware TX counters: available"
 else
   mount -t debugfs none /sys/kernel/debug 2>/dev/null
-  ls /sys/kernel/debug/ieee80211/*/ath9k/xmit >/dev/null 2>&1 \
+  [ -e "$XMIT" ] \
     && echo "ath9k hardware TX counters: available (mounted debugfs)" \
-    || echo "ath9k hardware TX counters: unavailable (netdev counters will be used)"
+    || echo "no hardware TX counters on $PHY; our own frames echoed back will be the TX proof"
 fi
 echo
 

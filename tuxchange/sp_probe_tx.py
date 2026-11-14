@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Stage 1: the first transmission. Make a real 3DS react to us."""
-import sys, os, time, socket, struct, select, random, re, glob, argparse
+import sys, os, time, socket, struct, select, random, re, argparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sp_parse
@@ -106,17 +106,25 @@ def is_streetpass_probe(mpdu):
 
 # If the radio is not transmitting, a silent console proves nothing.
 
-def find_ath9k_xmit():
-    for p in glob.glob('/sys/kernel/debug/ieee80211/phy*/ath9k/xmit'):
-        return p
-    return None
+def iface_phy(iface):
+    """-> 'phyN' the interface lives on, or None."""
+    try:
+        with open('/sys/class/net/%s/phy80211/name' % iface) as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
 
 
 def read_tx_counters(mon):
-    """-> (dict, source) of whatever TX counters this machine will give us."""
+    """-> (dict, source) of the hardware TX counters for the radio `mon` is on, if it has any.
+
+    Only ath9k exposes them (debugfs). mac80211 does not count injected frames in the monitor's
+    netdev statistics, so other radios fall back to counting our own frames echoed back, which
+    the callers do."""
     out, src = {}, None
-    x = find_ath9k_xmit()
-    if x:
+    phy = iface_phy(mon)
+    x = phy and '/sys/kernel/debug/ieee80211/%s/ath9k/xmit' % phy
+    if x and os.path.exists(x):
         try:
             with open(x) as f:
                 for line in f:
@@ -126,12 +134,6 @@ def read_tx_counters(mon):
             src = x
         except (OSError, PermissionError):
             out = {}
-    try:
-        with open('/sys/class/net/%s/statistics/tx_packets' % mon) as f:
-            out['netdev tx_packets'] = int(f.read().strip())
-        src = src or 'netdev'
-    except OSError:
-        pass
     return out, src
 
 
@@ -208,7 +210,7 @@ class Runner:
         t = iface_type(self.a.iface)
         if t != 'monitor':
             self.log('FATAL: %s is type %r, not monitor.' % (self.a.iface, t))
-            self.log('       Create one with:  sudo iw dev wlan0 interface add mon0 type monitor')
+            self.log('       Create one with:  sudo iw dev <adapter> interface add %s type monitor' % self.a.iface)
             return False
         try:
             s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0003))
@@ -316,6 +318,7 @@ class Runner:
         self.log('  our MAC %s   (an ACK to this MAC can only come from a device that heard us)'
                  % macstr(self.src))
         before, csrc = read_tx_counters(self.a.iface)
+        e0 = self.echoes
         fired = [0]
         last = {}
 
@@ -336,7 +339,7 @@ class Runner:
         after, _ = read_tx_counters(self.a.iface)
         self.log('  reacted to %d console probe(s); sent %d directed frames'
                  % (fired[0], self.sent['directed']))
-        self.report_tx(before, after, csrc)
+        self.report_tx(before, after, csrc, self.echoes - e0)
         return [e for e in self.events if e['name'] == 'ACK']
 
     def phase_engage(self, ch, secs):
@@ -346,6 +349,7 @@ class Runner:
         self.log('  token %s   services %s'
                  % (self.token.hex(), ['%08x' % s[0] for s in self.services]))
         before, csrc = read_tx_counters(self.a.iface)
+        e0 = self.echoes
         deadline = time.time() + secs
         nxt = 0.0
         while time.time() < deadline:
@@ -357,13 +361,18 @@ class Runner:
             self.pump(min(deadline, nxt))
         after, _ = read_tx_counters(self.a.iface)
         self.log('  sent %d broadcast StreetPass probes' % self.sent['broadcast'])
-        self.report_tx(before, after, csrc)
+        self.report_tx(before, after, csrc, self.echoes - e0)
         return [e for e in self.events if e['name'] in ('ProbeResp', 'Action', 'ProbeReq')]
 
-    def report_tx(self, before, after, csrc):
+    def report_tx(self, before, after, csrc, echoes=0):
         d = diff_counters(before, after)
+        if not d and echoes:
+            self.log('  TX proof: %d of our frames echoed back by the driver after sending'
+                     % echoes)
+            return True
         if not d:
-            self.log('  TX counters did not move, so the radio may not be transmitting at all.')
+            self.log('  TX counters did not move and none of our frames came back, so the radio')
+            self.log('    may not be transmitting at all.')
             self.log('    Treat any negative result below as unproven until this is fixed.')
             return False
         self.log('  TX proof (%s):' % (csrc or 'unknown'))
@@ -390,7 +399,7 @@ class Runner:
             self.log('     Injection, addressing, channel and rate are all proven good.')
         else:
             self.log('  RUNG 1a no ACK.')
-            self.log('     If the TX counters moved, our frames are on the air but no console')
+            self.log('     If TX was proven, our frames are on the air but no console')
             self.log('     acknowledged: it was off-channel, asleep, or out of range.')
         self.log('')
         if engages:
