@@ -11,7 +11,7 @@ body:
         than one engagement — measured over 365 runs. And a console will exchange with a given
         peer address *once*; it remembers who it has met. Both are covered in the wiki.
 
-        **2. Do not attach key material or captures.** `aes_keys.txt`, `linuxpass.keys`, NAND
+        **2. Do not attach key material or captures.** `aes_keys.txt`, `tuxchange.keys`, NAND
         or CEC dumps, and packet captures all carry either your keys or other people's Mii
         names. Redact any 32-character hex string before pasting a log.
 
@@ -62,6 +62,6 @@ body:
     id: versions
     attributes:
       label: Versions
-      description: "LinuxPass commit, python3 --version, kernel (uname -r), distribution."
+      description: "Tuxchange commit, python3 --version, kernel (uname -r), distribution."
     validations:
       required: true

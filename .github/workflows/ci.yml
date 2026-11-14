@@ -22,34 +22,34 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      # No `pip install`: this job keeps LinuxPass free of required dependencies.
+      # No `pip install`: this job keeps Tuxchange free of required dependencies.
       - name: Everything compiles
-        run: python -m compileall -q linuxpass gui tools
+        run: python -m compileall -q tuxchange gui tools
 
       # These run with no keys and no corpus, as on a fresh clone.
       - name: Daemon self-test
-        run: python linuxpass/sp_relay.py selftest
+        run: python tuxchange/sp_relay.py selftest
 
       - name: Link self-test
-        run: python linuxpass/sp_link.py --selftest
+        run: python tuxchange/sp_link.py --selftest
 
       - name: Full handshake simulation
-        run: python linuxpass/sp_link.py --simulate
+        run: python tuxchange/sp_link.py --simulate
 
       - name: Remaining module self-tests
         run: |
           set -e
-          python linuxpass/sp_build.py --selftest
-          python linuxpass/sp_mii.py --selftest
-          python linuxpass/sp_cecstore.py --selftest
-          python linuxpass/sp_store.py --selftest
-          python linuxpass/sp_smdh.py --selftest
-          python linuxpass/sp_yysession.py --selftest
-          python linuxpass/sp_savefs.py --selftest
-          python linuxpass/sp_cecexport.py --selftest
-          python linuxpass/sp_probe_tx.py --selftest
-          python linuxpass/sp_aes.py --selftest
-          python linuxpass/sp_identity.py selftest
+          python tuxchange/sp_build.py --selftest
+          python tuxchange/sp_mii.py --selftest
+          python tuxchange/sp_cecstore.py --selftest
+          python tuxchange/sp_store.py --selftest
+          python tuxchange/sp_smdh.py --selftest
+          python tuxchange/sp_yysession.py --selftest
+          python tuxchange/sp_savefs.py --selftest
+          python tuxchange/sp_cecexport.py --selftest
+          python tuxchange/sp_probe_tx.py --selftest
+          python tuxchange/sp_aes.py --selftest
+          python tuxchange/sp_identity.py selftest
           python tools/macfilter_decode.py --selftest
 
       - name: No key material has crept into the tree
@@ -62,7 +62,7 @@ jobs:
       - name: Shell scripts parse
         run: |
           set -e
-          for f in scripts/linuxpass scripts/linuxpass-link scripts/linuxpass-probe \
+          for f in scripts/tuxchange scripts/tuxchange-link scripts/tuxchange-probe \
                    scripts/sp_monitor.sh install/install.sh; do
             bash -n "$f" && echo "ok  $f"
           done
