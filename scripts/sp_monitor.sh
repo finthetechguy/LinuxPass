@@ -18,17 +18,34 @@ WAS_UP=/run/tuxchange.iface-was-up  # written once, so a repeated `up` cannot lo
 if [ "$(id -u)" -ne 0 ]; then echo "sp_monitor.sh needs root"; exit 1; fi
 for t in iw ip timeout; do command -v $t >/dev/null || { echo "install $t"; exit 1; }; done
 
+# mt792x firmware ignores active monitor, but kernels before 7.3 still advertise it.
+NO_ACTIVE_MONITOR=" mt7921e mt7921u mt7921s mt7925e mt7925u "
+
+iface_driver() {
+  basename "$(readlink -f "/sys/class/net/$1/device/driver" 2>/dev/null)" 2>/dev/null
+}
+
+can_active_monitor() {
+  # The hardware must ACK frames addressed to the monitor's MAC, which is what active monitor means.
+  local phy
+  case "$NO_ACTIVE_MONITOR" in *" $(iface_driver "$1") "*) return 1 ;; esac
+  phy=$(cat "/sys/class/net/$1/phy80211/name" 2>/dev/null) || return 1
+  timeout 10 iw phy "$phy" info 2>/dev/null | grep -q 'supports active monitor'
+}
+
 pick_iface() {
-  # Only ath9k is picked automatically. Any other driver must be named in SP_IFACE.
-  local i drv
+  # Any adapter that can do active monitor qualifies; ath9k, the tested driver, wins a tie.
+  local i first=
   for i in $(iw dev 2>/dev/null | sed -n 's/^\tInterface //p'); do
     [ "$i" = "$MON" ] && continue
-    drv=$(basename "$(readlink -f "/sys/class/net/$i/device/driver" 2>/dev/null)" 2>/dev/null)
-    if [ "$drv" = "ath9k" ]; then
+    can_active_monitor "$i" || continue
+    if [ "$(iface_driver "$i")" = "ath9k" ]; then
       echo "$i"
       return
     fi
+    [ -n "$first" ] || first=$i
   done
+  [ -n "$first" ] && echo "$first"
 }
 
 release_radio() {
@@ -57,13 +74,13 @@ case "$ACTION" in
 up)
   if [ -z "$IFACE" ]; then
     IFACE=$(pick_iface)
-    [ -n "$IFACE" ] || { echo "no ath9k adapter found, so no adapter was touched; name one with SP_IFACE="; exit 1; }
+    [ -n "$IFACE" ] || { echo "no adapter with active monitor support found, so no adapter was touched; name one with SP_IFACE="; exit 1; }
     echo "using $IFACE (set SP_IFACE to pin a different adapter)"
   fi
   if ! timeout 10 iw dev "$IFACE" info >/dev/null 2>&1; then
     ALT=$(pick_iface)
     if [ -z "$ALT" ]; then
-      echo "no such wireless interface: $IFACE, and no ath9k adapter to use instead"
+      echo "no such wireless interface: $IFACE, and no adapter with active monitor support to use instead"
       iw dev | sed -n 's/^\tInterface /  /p'; exit 1
     fi
     echo "WARNING: no such wireless interface: $IFACE, falling back to $ALT"

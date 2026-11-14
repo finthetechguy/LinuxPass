@@ -31,8 +31,34 @@ ROTATE_CHOICES = ((0, 'Never'), (3600, 'Every hour'), (4 * 3600, 'Every 4 hours'
                   (24 * 3600, 'Every day'))
 
 
+# mt792x firmware ignores active monitor, but kernels before 7.3 still advertise it.
+NO_ACTIVE_MONITOR = frozenset(('mt7921e', 'mt7921u', 'mt7921s', 'mt7925e', 'mt7925u'))
+_active_monitor_cache = {}
+
+
+def can_active_monitor(name, drv):
+    """Whether the adapter's radio will ACK frames addressed to a monitor vif. Cached per phy."""
+    if drv in NO_ACTIVE_MONITOR:
+        return False
+    try:
+        with open(os.path.join('/sys/class/net', name, 'phy80211', 'name')) as f:
+            phy = f.read().strip()
+    except OSError:
+        return False
+    if phy not in _active_monitor_cache:
+        try:
+            r = subprocess.run(['iw', 'phy', phy, 'info'], capture_output=True, text=True,
+                               timeout=10)
+            _active_monitor_cache[phy] = 'supports active monitor' in r.stdout
+        except (OSError, subprocess.SubprocessError):
+            return False
+    return _active_monitor_cache[phy]
+
+
 def wireless_ifaces():
-    """-> [(name, driver)] for every real wireless adapter, monitor vifs excluded, ath9k first."""
+    """-> [(name, driver, usable)] for every real wireless adapter, monitor vifs excluded.
+
+    Usable adapters (active monitor) come first, ath9k, the tested driver, ahead of the rest."""
     out = []
     try:
         names = sorted(os.listdir('/sys/class/net'))
@@ -52,9 +78,9 @@ def wireless_ifaces():
             drv = os.path.basename(os.path.realpath(os.path.join(d, 'device', 'driver')))
         except OSError:
             drv = ''
-        out.append((n, '' if drv in ('driver', '') else drv))
-    # ath9k is the only tested driver that can inject.
-    out.sort(key=lambda t: (t[1] != 'ath9k', t[0]))
+        drv = '' if drv in ('driver', '') else drv
+        out.append((n, drv, can_active_monitor(n, drv)))
+    out.sort(key=lambda t: (not t[2], t[1] != 'ath9k', t[0]))
     return out
 
 
@@ -300,8 +326,13 @@ class HomePage(Page):
         can_save = s.get('can_save_settings', False)
         ifaces = wireless_ifaces()
         chosen = s.get('adapter', '')
-        names = [n for n, _ in ifaces]
-        labels = ['%s  (%s)' % (n, d) if d else n for n, d in ifaces]
+        names = [n for n, _d, _u in ifaces]
+        labels = []
+        for n, d, usable in ifaces:
+            notes = [d] if d else []
+            if not usable:
+                notes.append('no active monitor')
+            labels.append('%s  (%s)' % (n, ', '.join(notes)) if notes else n)
         # A saved adapter that is absent right now must stay listed, or the row would show another.
         if chosen and chosen not in names:
             names.insert(0, chosen)

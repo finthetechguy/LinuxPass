@@ -60,7 +60,7 @@ install)
   if [ ! -e "$DEFAULTS" ]; then
     cat > "$DEFAULTS" <<EOF
 # Tunables for tuxchange.service. Edit here, then: systemctl restart tuxchange
-# Empty picks the first ath9k adapter. Any other driver must be named here.
+# Empty picks an adapter that supports active monitor, preferring ath9k.
 SP_IFACE=
 SP_MON=mon0
 SP_STORE=$STATE
