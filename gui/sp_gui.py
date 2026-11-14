@@ -77,6 +77,9 @@ def wireless_ifaces():
                     continue
         except OSError:
             pass
+        # Mixed mode's own station vif is named after its monitor: mon0 -> mon0-sta.
+        if n.endswith('-sta') and n[:-4] in names:
+            continue
         try:
             drv = os.path.basename(os.path.realpath(os.path.join(d, 'device', 'driver')))
         except OSError:

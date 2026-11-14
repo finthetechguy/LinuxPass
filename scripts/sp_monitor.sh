@@ -5,14 +5,17 @@
 #
 # Two ways to make the hardware ACK the console:
 #   active  an active monitor vif carries our MAC (ath9k, most mt76).
-#   mixed   a plain monitor vif sends and sniffs while the adapter's own station vif carries our
-#           MAC, unassociated, so the chip ACKs it. For adapters without active monitor support.
+#   mixed   a plain monitor vif sends and sniffs while a station vif of our own ($MON-sta) carries
+#           our MAC, unassociated, so the chip ACKs it. For adapters without active monitor support.
+#           The adapter's own vif is left down with its MAC untouched; a station vif we create is
+#           one that neither iwd nor wpa_supplicant will try to connect.
 # SP_MODE=auto (default) uses active when the adapter supports it and mixed otherwise.
 set -u
 ACTION=${1:-}
 IFACE=${SP_IFACE:-}
 MON=${SP_MON:-mon0}
 MODE=${SP_MODE:-auto}
+ACKV=$MON-sta                       # mixed mode's station vif; 15 characters at most
 CHANNELS=${SP_CHANNELS:-1}
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/.." && pwd)
@@ -22,7 +25,7 @@ PY="$ROOT/.venv/bin/python"
 NM_FLAG=/run/tuxchange.nm-stopped
 RUN_IFACE=/run/tuxchange.iface     # what `up` really took, so `down` restores THAT adapter
 WAS_UP=/run/tuxchange.iface-was-up  # written once, so a repeated `up` cannot lose the original state
-ORIG_MAC=/run/tuxchange.iface-mac   # mixed mode changes the adapter's own MAC; `down` puts it back
+IWD_FLAG=/run/tuxchange.iwd-off     # iwd was told to power the adapter off; `down` powers it on
 
 if [ "$(id -u)" -ne 0 ]; then echo "sp_monitor.sh needs root"; exit 1; fi
 for t in iw ip timeout; do command -v $t >/dev/null || { echo "install $t"; exit 1; }; done
@@ -57,7 +60,7 @@ pick_iface() {
   # can do mixed mode, but never one that is connected, so the machine's own Wi-Fi is left alone.
   local i first= mixed=
   for i in $(iw dev 2>/dev/null | sed -n 's/^\tInterface //p'); do
-    [ "$i" = "$MON" ] && continue
+    [ "$i" = "$MON" ] || [ "$i" = "$ACKV" ] && continue
     if [ "$MODE" != mixed ] && can_active_monitor "$i"; then
       if [ "$(iface_driver "$i")" = "ath9k" ]; then
         echo "$i"
@@ -91,7 +94,23 @@ release_radio() {
   timeout 20 systemctl stop NetworkManager && touch "$NM_FLAG"
 }
 
+release_iwd() {
+  # iwd ignores NetworkManager's "unmanaged" and reconnects any vif of its own that comes up, so
+  # power the adapter off in iwd as well. NetworkManager's iwd backend needs this too.
+  command -v iwctl >/dev/null || return 0
+  systemctl is-active --quiet iwd 2>/dev/null || return 0
+  if timeout 10 iwctl device "$IFACE" set-property Powered off >/dev/null 2>&1; then
+    touch "$IWD_FLAG"
+    echo "iwd told to power $IFACE off"
+  fi
+}
+
 restore_radio() {
+  if [ -e "$IWD_FLAG" ]; then
+    rm -f "$IWD_FLAG"
+    timeout 10 iwctl device "$IFACE" set-property Powered on >/dev/null 2>&1 \
+      && echo "$IFACE powered back on in iwd"
+  fi
   if [ -e "$NM_FLAG" ]; then
     rm -f "$NM_FLAG"
     timeout 20 systemctl start NetworkManager 2>/dev/null && echo "NetworkManager restarted"
@@ -133,15 +152,14 @@ up)
     *) echo "SP_MODE must be auto, active or mixed, not $MODE"; exit 1 ;;
   esac
   release_radio
+  release_iwd
   timeout 10 iw dev "$MON" del 2>/dev/null
+  timeout 10 iw dev "$ACKV" del 2>/dev/null
   if [ "$MODE" = mixed ]; then
     can_monitor "$IFACE" || { echo "$IFACE cannot run a monitor interface"; exit 1; }
-    if [ ! -e "$ORIG_MAC" ]; then
-      PERM=$(ip -o link show dev "$IFACE" 2>/dev/null | sed -n 's/.* permaddr \([0-9a-f:]*\).*/\1/p')
-      printf '%s\n' "${PERM:-$(cat "/sys/class/net/$IFACE/address")}" >"$ORIG_MAC" 2>/dev/null
-    fi
+    PHY=$(cat "/sys/class/net/$IFACE/phy80211/name")
     timeout 15 ip link set "$IFACE" down 2>/dev/null
-    if ! timeout 15 iw dev "$IFACE" interface add "$MON" type monitor; then
+    if ! timeout 15 iw phy "$PHY" interface add "$MON" type monitor; then
       echo "could not create a monitor interface on $IFACE"; exit 1
     fi
     timeout 10 ip link set "$MON" mtu 2000 2>/dev/null \
@@ -150,18 +168,24 @@ up)
     # Tune while the monitor is alone on the radio, so the station vif comes up on this channel.
     timeout 10 iw dev "$MON" set channel "${CHANNELS%%,*}" 2>/dev/null \
       || echo "WARNING: could not tune $MON to channel ${CHANNELS%%,*}"
-    timeout 10 ip link set "$IFACE" address "$MAC" || { echo "could not set $IFACE MAC"; exit 1; }
-    # Up but never associated: the driver programs our MAC into the chip, which then ACKs it.
-    timeout 15 ip link set "$IFACE" up || { echo "could not bring $IFACE up"; exit 1; }
-    # Anything still letting go of the adapter can take it down again; check it stayed up.
-    sleep 2
-    if ! is_up "$IFACE" || [ "$(cat "/sys/class/net/$IFACE/address")" != "$MAC" ]; then
-      echo "$IFACE was taken down or changed behind our back; setting it up again"
-      timeout 15 ip link set "$IFACE" down 2>/dev/null
-      timeout 10 ip link set "$IFACE" address "$MAC" || { echo "could not set $IFACE MAC"; exit 1; }
-      timeout 15 ip link set "$IFACE" up || { echo "could not bring $IFACE up"; exit 1; }
+    if ! timeout 15 iw phy "$PHY" interface add "$ACKV" type managed; then
+      echo "could not create a station interface on $IFACE"; exit 1
     fi
-    echo "mixed mode: monitor $MON sends and listens, $IFACE up as $MAC (the hardware will ACK frames addressed to it)"
+    # NetworkManager adopts new devices; with wpa_supplicant it would scan and connect on this one.
+    if command -v nmcli >/dev/null && systemctl is-active --quiet NetworkManager 2>/dev/null; then
+      timeout 10 nmcli device set "$ACKV" managed no >/dev/null 2>&1
+    fi
+    timeout 10 ip link set "$ACKV" address "$MAC" || { echo "could not set $ACKV MAC"; exit 1; }
+    # Up but never associated: the driver programs our MAC into the chip, which then ACKs it.
+    timeout 15 ip link set "$ACKV" up || { echo "could not bring $ACKV up"; exit 1; }
+    sleep 2
+    if ! is_up "$ACKV" || [ "$(cat "/sys/class/net/$ACKV/address")" != "$MAC" ]; then
+      echo "$ACKV was taken down or changed behind our back; setting it up again"
+      timeout 15 ip link set "$ACKV" down 2>/dev/null
+      timeout 10 ip link set "$ACKV" address "$MAC" || { echo "could not set $ACKV MAC"; exit 1; }
+      timeout 15 ip link set "$ACKV" up || { echo "could not bring $ACKV up"; exit 1; }
+    fi
+    echo "mixed mode: monitor $MON sends and listens, $ACKV up as $MAC (the hardware will ACK frames addressed to it)"
     exit 0
   fi
   # `flags active` must be on the create command, or ath9k dereferences a NULL txq and oopses.
@@ -183,11 +207,7 @@ down)
   # Hand back the adapter `up` really took, which may differ from SP_IFACE.
   [ -r "$RUN_IFACE" ] && IFACE=$(cat "$RUN_IFACE")
   timeout 10 iw dev "$MON" del 2>/dev/null
-  if [ -r "$ORIG_MAC" ] && [ -n "$IFACE" ]; then
-    timeout 15 ip link set "$IFACE" down 2>/dev/null
-    timeout 10 ip link set "$IFACE" address "$(cat "$ORIG_MAC")" 2>/dev/null \
-      && echo "$IFACE MAC put back to $(cat "$ORIG_MAC")"
-  fi
+  timeout 10 iw dev "$ACKV" del 2>/dev/null
   restore_radio
   if [ -e "$WAS_UP" ] && [ -n "$IFACE" ]; then
     if timeout 15 ip link set "$IFACE" up 2>/dev/null; then
@@ -196,7 +216,7 @@ down)
       echo "could not bring $IFACE back up; run: sudo ip link set $IFACE up"
     fi
   fi
-  rm -f "$RUN_IFACE" "$WAS_UP" "$ORIG_MAC"
+  rm -f "$RUN_IFACE" "$WAS_UP"
   echo "monitor $MON removed"
   ;;
 *)
