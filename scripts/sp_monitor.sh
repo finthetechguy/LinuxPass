@@ -90,8 +90,10 @@ up)
   # A full YY segment is 1538 bytes at the socket, over the default 1500 MTU.
   timeout 10 ip link set "$MON" mtu 2000 2>/dev/null \
     || echo "WARNING: could not raise $MON MTU; 1452-byte segments will fail with EMSGSIZE"
+  # Down before the monitor comes up: the managed vif holds the channel otherwise, some drivers
+  # program the full MAC only for the first vif up (mt76x0/mt76x2), and some allow one vif (mt7601u).
+  timeout 15 ip link set "$IFACE" down 2>/dev/null
   timeout 15 ip link set "$MON" up || { echo "could not bring $MON up"; exit 1; }
-  timeout 15 ip link set "$IFACE" down 2>/dev/null    # the managed vif holds the channel otherwise
   echo "active monitor $MON up as $MAC (the hardware will ACK frames addressed to it)"
   ;;
 down)
