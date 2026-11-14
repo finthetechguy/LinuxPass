@@ -1563,7 +1563,7 @@ def _selftest():
         Lt.echoes = 7
         Lt.verdict({}, {}, None)
         chk('without hardware counters, our echoed frames are the TX proof',
-            any('TX proof' in m and '7 of our frames' in m for m in Lt.log_lines))
+            any('TX proof' in m and '7 of frames echoed' in m for m in Lt.log_lines))
         Lt.log_lines, Lt.echoes = [], 0
         Lt.verdict({}, {}, None)
         chk('and with neither, the verdict says TX is unproven',
