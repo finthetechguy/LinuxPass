@@ -665,53 +665,42 @@ class DenylistPage(Page):
             return self.offline(why)
         self.reset()
 
-        g = self.group('Blocked consoles',
-                       'Tuxchange refuses to exchange with these consoles until you unblock '
-                       'them, whatever MAC they use.')
-        b = Gtk.Button(label='Block a console…', halign=Gtk.Align.END, valign=Gtk.Align.CENTER,
-                       margin_bottom=6)
-        b.connect('clicked', lambda *_a: self.app.dialog_block())
-        g.set_header_suffix(b)
-        if not rep['blocked']:
-            g.add(row('Nothing blocked', 'Every console can exchange with this relay.'))
-        for e in rep['blocked']:
-            r = row(e['mac'], e.get('note') or 'blocked %s'
-                    % time.strftime('%d %b %H:%M', time.localtime(e.get('when', 0))))
-            r.add_suffix(icon_button('list-remove-symbolic', 'Unblock',
-                                     lambda m=e['mac']: self.app.act('unblock', mac=m)))
-            g.add(r)
+        if self.app.denylist:
+            g = self.group('Blocked consoles',
+                           'Tuxchange refuses to exchange with these consoles until you unblock '
+                           'them, whatever MAC they use.')
+            b = Gtk.Button(label='Block a console', halign=Gtk.Align.END,
+                           valign=Gtk.Align.CENTER, margin_bottom=6)
+            b.connect('clicked', lambda *_a: self.app.dialog_block())
+            g.set_header_suffix(b)
+            if not rep['blocked']:
+                g.add(row('Nothing blocked', 'Every console can exchange.'))
+            for e in rep['blocked']:
+                r = row(e['mac'], e.get('note') or 'blocked %s'
+                        % time.strftime('%d %b %H:%M', time.localtime(e.get('when', 0))))
+                r.add_suffix(icon_button('list-remove-symbolic', 'Unblock',
+                                         lambda m=e['mac']: self.app.act('unblock', mac=m)))
+                g.add(r)
 
         g = self.group('MAC filter',
                        'Like a 3DS, Tuxchange refuses a MAC once it has exchanged with it, and '
-                       'meets that console again when it presents a new MAC. The newest %d are '
-                       'kept; removing one lets it exchange again.' % rep['filter_max'])
+                       'exchanges with that console again when it rotates it\'s MAC.\n Max: %d' % rep['filter_max'])
         if rep['filter']:
             b = Gtk.Button(label='Clear filter', valign=Gtk.Align.CENTER, margin_bottom=6)
             b.connect('clicked', lambda *_a: self.app.dialog_clear_filter(len(rep['filter'])))
             g.set_header_suffix(b)
         else:
-            g.add(row('The filter is empty', 'No console has exchanged with this relay yet.'))
+            g.add(row('The filter is empty', 'A console will appear here once exchanged.'))
         for e in rep['filter']:
             r = row(e['mac'], '%d exchange(s)' % e['exchanges']
                     + ('   ·   last %s' % time.strftime('%d %b %H:%M', time.localtime(e['last']))
                        if e.get('last') else ''))
             box = Gtk.Box(spacing=6, valign=Gtk.Align.CENTER)
-            box.append(icon_button('list-remove-symbolic', 'Remove from the filter',
+            box.append(icon_button('list-remove-symbolic', 'Remove',
                                    lambda m=e['mac']: self.app.act('unfilter', mac=m,
                                                                    then='Removed from the filter')))
-            box.append(icon_button('action-unavailable-symbolic', 'Block this console',
-                                   lambda m=e['mac']: self.app.act('block', mac=m,
-                                                                   note='blocked from the GUI')))
             r.add_suffix(box)
             g.add(r)
-
-        if rep['backing_off']:
-            g = self.group('Retrying soon',
-                           'These consoles engaged but nothing moved. Tuxchange leaves them '
-                           'alone briefly so a pass can reach a different console.')
-            for e in rep['backing_off']:
-                g.add(row(e['mac'], 'retry in %s   ·   %d failed attempt(s)'
-                          % (human_secs(e['remaining_s']), e['attempts'])))
 
 
 class LogPage(Page):
@@ -805,10 +794,7 @@ class RelayApp(Adw.Application):
     def do_startup(self):
         Adw.Application.do_startup(self)
         self.pages = [HomePage(self), EncountersPage(self), OutboxPage(self),
-                      InboxPage(self)]
-        if self.denylist:
-            self.pages.append(DenylistPage(self))
-        self.pages.append(LogPage(self))
+                      InboxPage(self), DenylistPage(self), LogPage(self)]
 
     def do_activate(self):
         if self.win is None:
@@ -895,8 +881,8 @@ class RelayApp(Adw.Application):
 
     def dialog_clear_filter(self, n):
         d = Adw.AlertDialog(heading='Clear the MAC filter?',
-                            body='All %d console(s) in it will be able to exchange with this '
-                                 'relay again on the MAC they used before.' % n)
+                            body='All %d console(s) will be able to exchange with this '
+                                 'device again on the MAC they used before.' % n)
         d.add_response('cancel', 'Cancel')
         d.add_response('ok', 'Clear')
         d.set_response_appearance('ok', Adw.ResponseAppearance.DESTRUCTIVE)
@@ -1080,10 +1066,10 @@ class RelayApp(Adw.Application):
 def main():
     ap = argparse.ArgumentParser(description='GTK front end for Tuxchange.')
     ap.add_argument('--store', default=default_store())
-    ap.add_argument('--denylist', action='store_true')
+    ap.add_argument('--blocklist', action='store_true')
     a = ap.parse_args()
     Adw.init()
-    app = RelayApp(a.store, a.denylist)
+    app = RelayApp(a.store, a.blocklist)
     return app.run([])
 
 
