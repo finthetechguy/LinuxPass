@@ -966,16 +966,50 @@ class Relay:
                      % (self.rotate_seconds(), self.identity))
             self.save_rotation()
 
+    SYSFS_NET = '/sys/class/net'
+
+    def ack_iface(self):
+        """The vif whose MAC the hardware ACKs.
+
+        In mixed mode that is the adapter's own station vif, up beside our monitor on the same
+        radio; otherwise it is the (active) monitor vif itself."""
+        base = self.SYSFS_NET
+        try:
+            with open(os.path.join(base, self.a.iface, 'phy80211', 'name')) as f:
+                phy = f.read().strip()
+            names = sorted(os.listdir(base))
+        except OSError:
+            return self.a.iface
+        for n in names:
+            if n == self.a.iface:
+                continue
+            d = os.path.join(base, n)
+            try:
+                with open(os.path.join(d, 'phy80211', 'name')) as f:
+                    if f.read().strip() != phy:
+                        continue
+                with open(os.path.join(d, 'type')) as f:
+                    if f.read().strip() == '803':      # ARPHRD_IEEE80211_RADIOTAP: a monitor
+                        continue
+                with open(os.path.join(d, 'flags')) as f:
+                    if not int(f.read().strip(), 16) & 0x1:     # IFF_UP
+                        continue
+            except (OSError, ValueError):
+                continue
+            return n
+        return self.a.iface
+
     def set_iface_mac(self, mac):
-        """Point the monitor vif at `mac`."""
+        """Point the vif the hardware ACKs at `mac`."""
         import subprocess
-        for args in (['ip', 'link', 'set', self.a.iface, 'down'],
-                     ['ip', 'link', 'set', self.a.iface, 'address', mac],
-                     ['ip', 'link', 'set', self.a.iface, 'up']):
+        iface = self.ack_iface()
+        for args in (['ip', 'link', 'set', iface, 'down'],
+                     ['ip', 'link', 'set', iface, 'address', mac],
+                     ['ip', 'link', 'set', iface, 'up']):
             r = subprocess.run(['timeout', '10'] + args, capture_output=True)
             if r.returncode != 0:
                 self.log('  could not set %s to %s (%s); keeping the current identity'
-                         % (self.a.iface, mac, (r.stderr or b'').decode().strip()))
+                         % (iface, mac, (r.stderr or b'').decode().strip()))
                 return False
         self._adopt(mac)
         return True
@@ -1000,9 +1034,9 @@ class Relay:
         return mac
 
     def iface_mac(self):
-        """The vif's own hardware address, lower-case, or None if it cannot be read."""
+        """The ACKing vif's hardware address, lower-case, or None if it cannot be read."""
         try:
-            with open('/sys/class/net/%s/address' % self.a.iface) as f:
+            with open('/sys/class/net/%s/address' % self.ack_iface()) as f:
                 return (f.read().strip().lower() or None)
         except OSError:
             return None
@@ -1012,23 +1046,24 @@ class Relay:
         self.iface_mismatch = None
         if self.a.rotate_identity:
             return True
+        iface = self.ack_iface()
         have = self.iface_mac()
         if have is None:
             self.log('  NOTE: cannot read the %s hardware address; not checking it against our '
-                     'identity' % self.a.iface)
+                     'identity' % iface)
             return True
         want = self.identity.lower()
         if have == want:
             return True
         self.log('  interface %s is %s but we transmit as %s; realigning the interface'
-                 % (self.a.iface, have, want))
+                 % (iface, have, want))
         if self.set_iface_mac(self.identity) and self.iface_mac() == want:
             self.log('  interface is now %s; the hardware will ACK frames addressed to us' % want)
             return True
-        self.iface_mismatch = {'iface': self.a.iface, 'iface_mac': self.iface_mac(),
+        self.iface_mismatch = {'iface': iface, 'iface_mac': self.iface_mac(),
                                'identity': want}
         self.log('  WARNING: %s is %s but we transmit as %s, and it could not be changed.'
-                 % (self.a.iface, self.iface_mac(), want))
+                 % (iface, self.iface_mac(), want))
         self.log('           The card will NOT ACK the console, so no exchange can complete and')
         self.log('           this relay will look healthy while being ignored.')
         self.log('           Fix: put SP_MAC=%s in /etc/default/tuxchange (or drop --mac), '
@@ -1938,6 +1973,26 @@ def _selftest():
         b6 = rig(rm6, 'ba:ae:6e:77:88:99')
         chk('a TIMED-rotation relay still realigns its interface at startup',
             rm6.align_iface_identity() and b6['calls'] == ['ba:ae:6e:44:55:66'], b6)
+
+        # Mixed mode: the ACKing vif is the up, non-monitor vif on the monitor's radio.
+        fake = os.path.join(tmp, 'sysnet')
+        for n, phy, typ, flags in (('mon0', 'phy1', '803', '0x1003'),
+                                   ('wlan0', 'phy0', '1', '0x1003'),     # another radio
+                                   ('wlan1', 'phy1', '1', '0x1003'),
+                                   ('wlan2', 'phy1', '1', '0x1002')):    # down
+            os.makedirs(os.path.join(fake, n, 'phy80211'))
+            for fn, v in (('phy80211/name', phy), ('type', typ), ('flags', flags)):
+                with open(os.path.join(fake, n, fn), 'w') as f:
+                    f.write(v + '\n')
+        rk = Relay(argparse.Namespace(**{**vars(args), 'store': os.path.join(tmp, 'ackv'),
+                                         'iface': 'mon0'}))
+        rk.SYSFS_NET = fake
+        chk('mixed mode ACKs on the up station vif sharing the monitor\'s radio',
+            rk.ack_iface() == 'wlan1', rk.ack_iface())
+        with open(os.path.join(fake, 'wlan1', 'flags'), 'w') as f:
+            f.write('0x1002\n')
+        chk('with the station vif down, the monitor itself ACKs (active monitor)',
+            rk.ack_iface() == 'mon0', rk.ack_iface())
 
         rgap = Relay(argparse.Namespace(**{**vars(args), 'store': os.path.join(tmp, 'gap'),
                                            'max_iface_failures': 2}))
